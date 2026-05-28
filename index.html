@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ステップ2：赤色検知テスト</title>
+    <title>ステップ2：カメラ映像確認版</title>
     <style>
         body {
             margin: 0;
@@ -19,22 +19,27 @@
         }
         .container {
             position: relative;
-            width: 100%;
+            width: 90%;
             max-width: 640px;
         }
-        /* カメラ映像は非表示にして、処理後のCanvasだけを画面に見せる */
+        /* 映像が見えない原因を探るため、一旦videoを画面に見えるようにします */
         video {
-            display: none;
+            width: 100%;
+            height: auto;
+            border: 2px solid #00ff00; /* ビデオの枠は緑 */
+            display: block;
+            margin-bottom: 10px;
         }
         canvas {
             width: 100%;
             height: auto;
-            border: 2px solid #555;
+            border: 2px solid #ff00ff; /* OpenCVの枠はピンク */
+            display: block;
         }
         button {
             margin: 20px;
-            padding: 12px 24px;
-            font-size: 16px;
+            padding: 15px 30px;
+            font-size: 18px;
             background-color: #007aff;
             color: white;
             border: none;
@@ -45,6 +50,7 @@
             font-size: 14px;
             color: #aaa;
             margin-bottom: 10px;
+            text-align: center;
         }
     </style>
     <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
@@ -63,7 +69,6 @@
     <script>
         const video = document.getElementById('camera-view');
         const canvas = document.getElementById('canvas-output');
-        const ctx = canvas.getContext('2d');
         const startBtn = document.getElementById('start-btn');
         const statusText = document.getElementById('status');
 
@@ -71,112 +76,104 @@
         let cap;
         let isProcessing = false;
 
-        // OpenCV.js の読み込み完了コールバック
         function onOpenCvReady() {
-            statusText.innerText = "OpenCV.js の準備が完了しました！";
-            startBtn.disabled = false; // ボタンを押せるようにする
+            statusText.innerText = "OpenCV.js の準備が完了しました！ボタンを押してください。";
+            startBtn.disabled = false;
         }
 
         startBtn.addEventListener('click', async () => {
+            statusText.innerText = "カメラにリクエスト中...";
             try {
+                // スマホの背面カメラを最優先でリクエスト
                 const constraints = {
                     audio: false,
                     video: {
-                        facingMode: { exact: 'environment' },
-                        width: { ideal: 640 }, // 処理軽量化のため解像度を少し落とす
+                        facingMode: 'environment', 
+                        width: { ideal: 640 },
                         height: { ideal: 480 }
                     }
                 };
-                const stream = await navigator.mediaDevices.getUserMedia(constraints);
-                video.srcObject = stream;
-                startBtn.style.display = 'none';
                 
-                // ビデオの読み込み完了を待ってから解析スタート
-                video.onloadedmetadata = () => {
-                    video.play();
-                    // Canvasのサイズをビデオに合わせる
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
-                    initOpenCV();
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                
+                // スマホのSafari対策として、ビデオの属性を強制設定
+                video.setAttribute('autoplay', '');
+                video.setAttribute('muted', '');
+                video.setAttribute('playsinline', '');
+                video.srcObject = stream;
+                
+                startBtn.style.display = 'none';
+                statusText.innerText = "映像の読み込みを待っています...";
+                
+                // 映像が実際に再生開始されたら実行
+                video.onplaying = () => {
+                    statusText.innerText = "映像再生開始。OpenCV初期化中...";
+                    
+                    const videoWidth = video.videoWidth || 640;
+                    const videoHeight = video.videoHeight || 480;
+                    
+                    canvas.width = videoWidth;
+                    canvas.height = videoHeight;
+                    
+                    src = new cv.Mat(videoHeight, videoWidth, cv.CV_8UC4);
+                    dst = new cv.Mat(videoHeight, videoWidth, cv.CV_8UC4);
+                    hsv = new cv.Mat();
+                    mask1 = new cv.Mat();
+                    mask2 = new cv.Mat();
+                    mask = new cv.Mat();
+                    cap = new cv.VideoCapture(video);
+                    
                     isProcessing = true;
-                    // ループ処理開始
+                    statusText.innerText = "検出スタート！赤いマークを映してください";
                     requestAnimationFrame(processVideo);
                 };
+                
+                // 万が一再生が始まらない場合の強制トリガー
+                setTimeout(() => {
+                    if(!isProcessing) video.play();
+                }, 1000);
+
             } catch (error) {
                 console.error(error);
-                alert("背面カメラの起動に失敗しました。PCの場合はfacingModeを修正してください。");
-                // PC用フォールバック
-                const fallbackStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
-                video.srcObject = fallbackStream;
-                video.onloadedmetadata = () => {
-                    video.play();
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
-                    initOpenCV();
-                    isProcessing = true;
-                    requestAnimationFrame(processVideo);
-                    startBtn.style.display = 'none';
-                };
+                statusText.innerText = "エラー: " + error.name;
+                alert("カメラの起動に失敗。権限が許可されているか確認してください。: " + error.message);
             }
         });
 
-        // OpenCVのメモリ領域（行列）を初期化
-        function initOpenCV() {
-            src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-            dst = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-            hsv = new cv.Mat();
-            mask1 = new cv.Mat();
-            mask2 = new cv.Mat();
-            mask = new cv.Mat();
-            cap = new cv.VideoCapture(video);
-        }
-
-        // 毎フレーム実行される画像解析ループ
         function processVideo() {
             if (!isProcessing) return;
 
             try {
-                // 1. 現在のビデオフレームを src に読み込む
                 cap.read(src);
-                src.copyTo(dst); // 描画用の下地としてコピー
+                src.copyTo(dst);
 
-                // 2. RGBからHSV（色相・彩度・明度）に変換（色検出がしやすくなるため）
                 cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
                 cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
 
-                // 3. 「赤色」の範囲を指定（赤はHSVで0付近と180付近に分かれるため2つ定義）
-                // [色相(0-180), 彩度(0-255), 明度(0-255)]
-                let low1 = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [0, 120, 70, 0]);
+                let low1 = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [0, 100, 50, 0]);
                 let high1 = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [10, 255, 255, 0]);
-                let low2 = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [170, 120, 70, 0]);
+                let low2 = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [170, 100, 50, 0]);
                 let high2 = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [180, 255, 255, 0]);
 
                 cv.inRange(hsv, low1, high1, mask1);
                 cv.inRange(hsv, low2, high2, mask2);
-                cv.bitwise_or(mask1, mask2, mask); // 2つの赤色マスクを結合
+                cv.bitwise_or(mask1, mask2, mask);
 
-                // メモリ解放
                 low1.delete(); high1.delete(); low2.delete(); high2.delete();
 
-                // 4. 赤い部分の「輪郭（塊）」を見つける
                 let contours = new cv.MatVector();
                 let hierarchy = new cv.Mat();
                 cv.findContours(mask, contours, hierarchy, cv.RETR_CCOMP, cv.CHAIN_APPROX_SIMPLE);
 
                 let redCount = 0;
 
-                // 5. 見つかった塊をループ処理
                 for (let i = 0; i < contours.size(); ++i) {
                     let cnt = contours.get(i);
                     let area = cv.contourArea(cnt);
 
-                    // 小さすぎるノイズ（ゴミ）は無視（シールの大きさに合わせて要調整）
-                    if (area > 100) {
+                    if (area > 150) {
                         redCount++;
-                        // 塊を囲む四角形（バウンディングボックス）を計算
                         let rect = cv.boundingRect(cnt);
-                        
-                        // 画面上の赤い塊に緑色の四角を描画
                         let point1 = new cv.Point(rect.x, rect.y);
                         let point2 = new cv.Point(rect.x + rect.width, rect.y + rect.height);
                         cv.rectangle(dst, point1, point2, [0, 255, 0, 255], 3);
@@ -184,13 +181,9 @@
                     cnt.delete();
                 }
 
-                // 状態を表示
                 statusText.innerText = `検出された赤いマークの数: ${redCount} 個`;
-
-                // 6. 処理後の映像をCanvasに表示
                 cv.imshow('canvas-output', dst);
 
-                // メモリ解放
                 contours.delete();
                 hierarchy.delete();
 
@@ -198,7 +191,6 @@
                 console.error(err);
             }
 
-            // 次のフレームへ
             requestAnimationFrame(processVideo);
         }
     </script>
