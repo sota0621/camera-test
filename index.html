@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ステップ2：カメラ映像確認版</title>
+    <title>ステップ2：赤色検知（軽量ネイティブ版）</title>
     <style>
         body {
             margin: 0;
@@ -22,18 +22,14 @@
             width: 90%;
             max-width: 640px;
         }
-        /* 映像が見えない原因を探るため、一旦videoを画面に見えるようにします */
         video {
-            width: 100%;
-            height: auto;
-            border: 2px solid #00ff00; /* ビデオの枠は緑 */
-            display: block;
-            margin-bottom: 10px;
+            display: none; /* 生ビデオは隠す */
         }
         canvas {
             width: 100%;
             height: auto;
-            border: 2px solid #ff00ff; /* OpenCVの枠はピンク */
+            border: 2px solid #007aff;
+            border-radius: 8px;
             display: block;
         }
         button {
@@ -47,44 +43,37 @@
             cursor: pointer;
         }
         #status {
-            font-size: 14px;
+            font-size: 16px;
+            font-weight: bold;
             color: #aaa;
             margin-bottom: 10px;
             text-align: center;
         }
     </style>
-    <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
 </head>
 <body>
 
-    <div id="status">OpenCV.jsを読み込んでいます...</div>
+    <div id="status">ボタンを押してカメラを起動してください</div>
     
     <div class="container">
         <video id="camera-view" autoplay playsinline muted></video>
         <canvas id="canvas-output"></canvas>
     </div>
 
-    <button id="start-btn" disabled>カメラを起動する</button>
+    <button id="start-btn">カメラを起動する</button>
 
     <script>
         const video = document.getElementById('camera-view');
         const canvas = document.getElementById('canvas-output');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
         const startBtn = document.getElementById('start-btn');
         const statusText = document.getElementById('status');
 
-        let src, dst, hsv, mask1, mask2, mask;
-        let cap;
         let isProcessing = false;
 
-        function onOpenCvReady() {
-            statusText.innerText = "OpenCV.js の準備が完了しました！ボタンを押してください。";
-            startBtn.disabled = false;
-        }
-
         startBtn.addEventListener('click', async () => {
-            statusText.innerText = "カメラにリクエスト中...";
+            statusText.innerText = "カメラを起動中...";
             try {
-                // スマホの背面カメラを最優先でリクエスト
                 const constraints = {
                     audio: false,
                     video: {
@@ -95,102 +84,93 @@
                 };
                 
                 const stream = await navigator.mediaDevices.getUserMedia(constraints);
-                
-                // スマホのSafari対策として、ビデオの属性を強制設定
-                video.setAttribute('autoplay', '');
-                video.setAttribute('muted', '');
-                video.setAttribute('playsinline', '');
                 video.srcObject = stream;
                 
-                startBtn.style.display = 'none';
-                statusText.innerText = "映像の読み込みを待っています...";
+                // iOS対策で念入りに再生をキック
+                video.play();
                 
-                // 映像が実際に再生開始されたら実行
-                video.onplaying = () => {
-                    statusText.innerText = "映像再生開始。OpenCV初期化中...";
-                    
-                    const videoWidth = video.videoWidth || 640;
-                    const videoHeight = video.videoHeight || 480;
-                    
-                    canvas.width = videoWidth;
-                    canvas.height = videoHeight;
-                    
-                    src = new cv.Mat(videoHeight, videoWidth, cv.CV_8UC4);
-                    dst = new cv.Mat(videoHeight, videoWidth, cv.CV_8UC4);
-                    hsv = new cv.Mat();
-                    mask1 = new cv.Mat();
-                    mask2 = new cv.Mat();
-                    mask = new cv.Mat();
-                    cap = new cv.VideoCapture(video);
-                    
+                startBtn.style.display = 'none';
+                
+                video.onloadedmetadata = () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
                     isProcessing = true;
-                    statusText.innerText = "検出スタート！赤いマークを映してください";
+                    statusText.innerText = "検出中... 赤いマークを映してください";
                     requestAnimationFrame(processVideo);
                 };
-                
-                // 万が一再生が始まらない場合の強制トリガー
-                setTimeout(() => {
-                    if(!isProcessing) video.play();
-                }, 1000);
 
             } catch (error) {
                 console.error(error);
-                statusText.innerText = "エラー: " + error.name;
-                alert("カメラの起動に失敗。権限が許可されているか確認してください。: " + error.message);
+                statusText.innerText = "カメラ起動エラー: " + error.message;
             }
         });
 
         function processVideo() {
             if (!isProcessing) return;
 
-            try {
-                cap.read(src);
-                src.copyTo(dst);
+            // 1. ビデオの現在のフレームをCanvasに描画
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-                cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
-                cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
+            // 2. 画面の全ピクセルデータを取得
+            const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imgData.data;
 
-                let low1 = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [0, 100, 50, 0]);
-                let high1 = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [10, 255, 255, 0]);
-                let low2 = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [170, 100, 50, 0]);
-                let high2 = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [180, 255, 255, 0]);
+            let redPixels = [];
 
-                cv.inRange(hsv, low1, high1, mask1);
-                cv.inRange(hsv, low2, high2, mask2);
-                cv.bitwise_or(mask1, mask2, mask);
+            // 3. ピクセルを走査して「強い赤色」をピックアップ (4ピクセルおきに間引いて高速化)
+            for (let i = 0; i < data.length; i += 16) {
+                const r = data[i];
+                const g = data[i + 1];
+                const b = data[i + 2];
 
-                low1.delete(); high1.delete(); low2.delete(); high2.delete();
-
-                let contours = new cv.MatVector();
-                let hierarchy = new cv.Mat();
-                cv.findContours(mask, contours, hierarchy, cv.RETR_CCOMP, cv.CHAIN_APPROX_SIMPLE);
-
-                let redCount = 0;
-
-                for (let i = 0; i < contours.size(); ++i) {
-                    let cnt = contours.get(i);
-                    let area = cv.contourArea(cnt);
-
-                    if (area > 150) {
-                        redCount++;
-                        let rect = cv.boundingRect(cnt);
-                        let point1 = new cv.Point(rect.x, rect.y);
-                        let point2 = new cv.Point(rect.x + rect.width, rect.y + rect.height);
-                        cv.rectangle(dst, point1, point2, [0, 255, 0, 255], 3);
-                    }
-                    cnt.delete();
+                // 赤成分が強く、緑と青が極端に低い部分（＝鮮やかな赤）を判定
+                if (r > 150 && g < 60 && b < 60) {
+                    const pixelIndex = i / 4;
+                    const x = pixelIndex % canvas.width;
+                    const y = Math.floor(pixelIndex / canvas.width);
+                    redPixels.push({x, y});
                 }
-
-                statusText.innerText = `検出された赤いマークの数: ${redCount} 個`;
-                cv.imshow('canvas-output', dst);
-
-                contours.delete();
-                hierarchy.delete();
-
-            } catch (err) {
-                console.error(err);
             }
 
+            // 4. 近い赤色ピクセル同士をグループ化して「塊」にする簡易ロジック
+            let clusters = [];
+            redPixels.forEach(p => {
+                let foundCluster = false;
+                for (let c of clusters) {
+                    // 既存の塊から50ピクセル以内なら同じ塊とみなす
+                    if (Math.abs(c.x - p.x) < 50 && Math.abs(c.y - p.y) < 50) {
+                        c.xs.push(p.x);
+                        c.ys.push(p.y);
+                        // 中心点を更新
+                        c.x = (c.x + p.x) / 2;
+                        c.y = (c.y + p.y) / 2;
+                        foundCluster = true;
+                        break;
+                    }
+                }
+                if (!foundCluster) {
+                    clusters.push({ x: p.x, y: p.y, xs: [p.x], ys: [p.y] });
+                }
+            });
+
+            // 小さすぎる塊（ノイズ）を排除
+            const validClusters = clusters.filter(c => c.xs.length > 5);
+
+            // 5. 検出した塊に枠を描画
+            validClusters.forEach(c => {
+                const minX = Math.min(...c.xs);
+                const maxX = Math.max(...c.xs);
+                const minY = Math.min(...c.ys);
+                const maxY = Math.max(...c.ys);
+                
+                ctx.strokeStyle = '#00ff00'; // 緑の枠線
+                ctx.lineWidth = 4;
+                ctx.strokeRect(minX - 5, minY - 5, (maxX - minX) + 10, (maxY - minY) + 10);
+            });
+
+            statusText.innerText = `検出された赤いマークの数: ${validClusters.length} 個`;
+
+            // ループを継続
             requestAnimationFrame(processVideo);
         }
     </script>
