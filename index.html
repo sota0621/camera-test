@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ステップ4：広角・ズーム機能対応</title>
+    <title>ステップ4：カメラアプリ連携版</title>
     <style>
         body {
             margin: 0;
@@ -18,210 +18,110 @@
             min-height: 100vh;
         }
         .container {
-            position: relative;
             width: 90%;
             max-width: 640px;
+            text-align: center;
         }
+        /* 撮影した動画のプレビュー画面 */
         video {
-            display: none;
-        }
-        canvas {
             width: 100%;
             height: auto;
             border: 2px solid #007aff;
             border-radius: 8px;
-            display: block;
-        }
-        /* コントロールUI */
-        .controls {
+            display: none; /* 最初は隠しておく */
             margin-top: 15px;
-            display: flex;
-            gap: 10px;
-            justify-content: center;
-            width: 100%;
         }
-        button {
-            padding: 12px 24px;
-            font-size: 16px;
-            color: white;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
+        /* 本物のカメラを呼び出すためのボタン（装飾） */
+        .file-input-label {
+            display: inline-block;
+            padding: 20px 40px;
+            font-size: 20px;
             font-weight: bold;
+            background-color: #007aff;
+            color: white;
+            border-radius: 12px;
+            cursor: pointer;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            margin-top: 20px;
         }
-        #start-btn { background-color: #34c759; padding: 15px 30px; font-size: 18px; }
-        .zoom-btn { background-color: #555; display: none; } /* カメラ起動後に表示 */
-        
+        #camera-input {
+            display: none; /* 本物のインプットは隠す */
+        }
         #status {
-            font-size: 16px;
+            font-size: 18px;
             font-weight: bold;
             color: #fff;
-            margin-bottom: 10px;
+            margin-bottom: 20px;
             text-align: center;
+            padding: 0 10px;
         }
-        #zoom-info {
-            font-size: 12px;
-            color: #aaa;
-            margin-top: 5px;
+        canvas {
+            display: none; /* 裏側での画像解析用 */
         }
     </style>
 </head>
 <body>
 
-    <div id="status">ボタンを押してカメラを起動してください</div>
-    
     <div class="container">
-        <video id="camera-view" autoplay playsinline muted></video>
-        <canvas id="canvas-output"></canvas>
-    </div>
+        <div id="status">下のボタンを押して、広角レンズ（0.5x）に切り替えて撮影してください</div>
+        
+        <label class="file-input-label" for="camera-input">📹 カメラを起動して録画</label>
+        <input type="file" id="camera-input" accept="video/*" capture="environment">
 
-    <button id="start-btn">カメラ起動 ＆ 音声ON</button>
-
-    <div class="controls">
-        <button id="zoom-out-btn" class="zoom-btn">❌ ズームアウト (広角)</button>
-        <button id="zoom-in-btn" class="zoom-btn">🔍 ズームイン</button>
+        <video id="preview-video" controls playsinline></video>
+        <canvas id="analysis-canvas"></canvas>
     </div>
-    <div id="zoom-info"></div>
 
     <script>
-        const video = document.getElementById('camera-view');
-        const canvas = document.getElementById('canvas-output');
+        const cameraInput = document.getElementById('camera-input');
+        const video = document.getElementById('preview-video');
+        const canvas = document.getElementById('analysis-canvas');
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        const startBtn = document.getElementById('start-btn');
-        const zoomInBtn = document.getElementById('zoom-in-btn');
-        const zoomOutBtn = document.getElementById('zoom-out-btn');
         const statusText = document.getElementById('status');
-        const zoomInfo = document.getElementById('zoom-info');
 
-        let isProcessing = false;
-        let lastSpokenTime = 0;
-        let videoTrack = null; // カメラのコントロール用トラック
-        let zoomCapabilities = null; // ズームの上限・下限データ
-        let currentZoom = 1.0;
-
-        startBtn.addEventListener('click', async () => {
-            statusText.innerText = "カメラを起動中...";
-            try {
-                const uttr = new SpeechSynthesisUtterance("");
-                window.speechSynthesis.speak(uttr);
-
-                // 【広角対応のポイント】
-                // Androidや一部のブラウザでは、高度なカメラスイッチ（zoomなど）を効かせるために
-                // 背面カメラ(environment)を詳細なパラメータでリクエストします
-                const constraints = {
-                    audio: false,
-                    video: {
-                        facingMode: 'environment', 
-                        width: { ideal: 640 },
-                        height: { ideal: 480 },
-                        // 高度な制御（ズーム）を許可する設定
-                        advanced: [{ zoom: 1 }] 
-                    }
-                };
-                
-                const stream = await navigator.mediaDevices.getUserMedia(constraints);
-                video.srcObject = stream;
-                video.play();
-                
-                startBtn.style.display = 'none';
-                
-                video.onloadedmetadata = () => {
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
-                    
-                    // カメラのコントロール権限（トラック）を取得
-                    videoTrack = stream.getVideoTracks()[0];
-                    
-                    // ズーム機能に対応しているかチェック
-                    setupZoomControls();
-
-                    isProcessing = true;
-                    statusText.innerText = "蛍光緑のシールを4つ画面に映してください";
-                    requestAnimationFrame(processVideo);
-                };
-
-            } catch (error) {
-                console.error(error);
-                statusText.innerText = "カメラ起動エラー: " + error.message;
-            }
-        });
-
-        // ズーム機能の初期設定
-        function setupZoomControls() {
-            if (!videoTrack || typeof videoTrack.getCapabilities !== 'function') {
-                zoomInfo.innerText = "お使いのブラウザ・機種はWebからのズーム制御に未対応です（標準画角で動作します）";
-                return;
-            }
-
-            const capabilities = videoTrack.getCapabilities();
-            
-            // ズーム機能（zoom）があるか確認
-            if (capabilities.zoom) {
-                zoomCapabilities = capabilities.zoom;
-                currentZoom = zoomCapabilities.min; // 最初は一番引き（広角：最小値）にする
-                
-                // カメラに一番引き（広角）の値を設定
-                applyZoom(currentZoom);
-
-                // ボタンを表示する
-                zoomInBtn.style.display = 'inline-block';
-                zoomOutBtn.style.display = 'inline-block';
-                updateZoomUI();
-            } else {
-                zoomInfo.innerText = "背面カメラのズーム機能が検出できませんでした。";
-            }
-        }
-
-        // 実際にカメラの倍率を変更する関数
-        function applyZoom(value) {
-            if (videoTrack && zoomCapabilities) {
-                // 安全のため、取得した最小値〜最大値の範囲内に収める
-                const safeValue = Math.max(zoomCapabilities.min, Math.min(zoomCapabilities.max, value));
-                currentZoom = safeValue;
-                
-                videoTrack.applyConstraints({
-                    advanced: [{ zoom: safeValue }]
-                }).catch(err => console.error("ズーム適用エラー:", err));
-                
-                updateZoomUI();
-            }
-        }
-
-        function updateZoomUI() {
-            if (zoomCapabilities) {
-                zoomInfo.innerText = `現在のズーム倍率値: ${currentZoom.toFixed(1)} (範囲: ${zoomCapabilities.min} 〜 ${zoomCapabilities.max})`;
-            }
-        }
-
-        // ズームボタンのイベント設定
-        zoomInBtn.addEventListener('click', () => {
-            if (zoomCapabilities) applyZoom(currentZoom + 0.3); // 0.3ずつズームイン
-        });
-
-        zoomOutBtn.addEventListener('click', () => {
-            if (zoomCapabilities) applyZoom(currentZoom - 0.3); // 0.3ずつズームアウト
-        });
-
-        // 音声案内関数
+        // 音声を再生する関数
         function speakGuide(text) {
-            const now = Date.now();
-            if (now - lastSpokenTime > 4000) { // 4秒の間隔
-                const uttr = new SpeechSynthesisUtterance(text);
-                uttr.lang = 'ja-JP';
-                window.speechSynthesis.speak(uttr);
-                lastSpokenTime = now;
-            }
+            const uttr = new SpeechSynthesisUtterance(text);
+            uttr.lang = 'ja-JP';
+            window.speechSynthesis.speak(uttr);
         }
 
-        function processVideo() {
-            if (!isProcessing) return;
+        // カメラアプリでの撮影・録画が終わった瞬間に発火するイベント
+        cameraInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
 
+            statusText.innerText = "動画を取り込み中... 解析しています...";
+            
+            // 撮影された動画をWebアプリに読み込む
+            const fileURL = URL.createObjectURL(file);
+            video.src = fileURL;
+            video.style.display = 'block'; // プレビューを表示
+
+            // 動画のデータが読み込まれたら解析開始
+            video.onloadedmetadata = () => {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                
+                // 動画の最初のほうのフレーム（0.5秒時点）に移動して解析
+                video.currentTime = 0.5;
+            };
+
+            video.onseeked = () => {
+                // 1フレームをキャプチャして画像解析にかける
+                analyzeFrame();
+            };
+        });
+
+        // 提出された動画に4つの緑のシールがあるかチェックするロジック
+        function analyzeFrame() {
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
             const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
             const data = imgData.data;
+            
             let greenPixels = [];
 
-            // 蛍光緑の検出
+            // 蛍光緑のピクセルを抽出
             for (let i = 0; i < data.length; i += 16) {
                 const r = data[i];
                 const g = data[i + 1];
@@ -234,11 +134,12 @@
                 }
             }
 
+            // グループ化（塊にする）
             let clusters = [];
             greenPixels.forEach(p => {
                 let foundCluster = false;
                 for (let c of clusters) {
-                    if (Math.abs(c.x - p.x) < 40 && Math.abs(c.y - p.y) < 40) {
+                    if (Math.abs(c.x - p.x) < 50 && Math.abs(c.y - p.y) < 50) {
                         c.xs.push(p.x); c.ys.push(p.y);
                         c.x = (c.x + p.x) / 2; c.y = (c.y + p.y) / 2;
                         foundCluster = true; break;
@@ -248,28 +149,16 @@
             });
 
             const validClusters = clusters.filter(c => c.xs.length > 5);
-
-            validClusters.forEach(c => {
-                const minX = Math.min(...c.xs); const maxX = Math.max(...c.xs);
-                const minY = Math.min(...c.ys); const maxY = Math.max(...c.ys);
-                ctx.strokeStyle = '#ff007f';
-                ctx.lineWidth = 4;
-                ctx.strokeRect(minX - 5, minY - 5, (maxX - minX) + 10, (maxY - minY) + 10);
-            });
-
-            // マーク数による判定
             const markCount = validClusters.length;
-            if (markCount === 4) {
-                statusText.innerHTML = `<span style="color: #34c759;">4つの点をすべて確認しました！</span>`;
-            } else if (markCount < 4) {
-                statusText.innerHTML = `<span style="color: #ffcc00;">マークが足りません (${markCount} / 4)</span>`;
-                speakGuide("もっと引きで撮影するか、ズームアウトしてください。");
-            } else {
-                statusText.innerHTML = `<span style="color: #ff3b30;">マークが多すぎます (${markCount}個)</span>`;
-                speakGuide("画面を微調整してください。");
-            }
 
-            requestAnimationFrame(processVideo);
+            // 判定と音声案内
+            if (markCount === 4) {
+                statusText.innerHTML = `<span style="color: #34c759;">成功！4つの点がすべて映っています。動画を保存しました。</span>`;
+                speakGuide("チェック完了しました。正常に撮影できています。");
+            } else {
+                statusText.innerHTML = `<span style="color: #ff3b30;">エラー：マークが足りません (${markCount} / 4)</span>`;
+                speakGuide("もっと引きで撮影してください。4つのマークが完全に映っていません。再撮影してください。");
+            }
         }
     </script>
 </body>
