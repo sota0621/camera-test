@@ -124,7 +124,7 @@
                 const b = data[i + 2];
 
                 // 赤成分が強く、緑と青が極端に低い部分（＝鮮やかな赤）を判定
-                if (r > 150 && g < 60 && b < 60) {
+                if (r > 140 && g < 70 && b < 70) {
                     const pixelIndex = i / 4;
                     const x = pixelIndex % canvas.width;
                     const y = Math.floor(pixelIndex / canvas.width);
