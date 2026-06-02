@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>赤色円形マーカー検出（OpenCV.js版）</title>
+    <title>黄緑色円形マーカー検出（OpenCV.js版）</title>
     <style>
         body {
             margin: 0;
@@ -27,7 +27,7 @@
         canvas {
             width: 100%;
             height: auto;
-            border: 2px solid #ff3b30;
+            border: 2px solid #34c759;
             border-radius: 8px;
             display: block;
         }
@@ -35,7 +35,7 @@
             margin: 20px;
             padding: 15px 30px;
             font-size: 18px;
-            background-color: #ff3b30;
+            background-color: #34c759;
             color: white;
             border: none;
             border-radius: 8px;
@@ -73,7 +73,7 @@
         const startBtn = document.getElementById('start-btn');
         const statusText = document.getElementById('status');
 
-        let src, dst, hsv, mask1, mask2, mask, contours, hierarchy;
+        let src, dst, hsv, mask, contours, hierarchy;
         let isProcessing = false;
 
         // OpenCV.js の読み込み完了を待つ
@@ -97,18 +97,16 @@
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
                     
-                    // OpenCV用メモリ領域の確保
+                    // OpenCV用メモリ領域の確保（不要なmask1, mask2を削除して軽量化）
                     src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
                     dst = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
                     hsv = new cv.Mat();
-                    mask1 = new cv.Mat();
-                    mask2 = new cv.Mat();
                     mask = new cv.Mat();
                     contours = new cv.MatVector();
                     hierarchy = new cv.Mat();
 
                     isProcessing = true;
-                    statusText.innerText = "ターゲット（赤丸4つ）を映してください";
+                    statusText.innerText = "ターゲット（黄緑の丸4つ）を映してください";
                     requestAnimationFrame(processVideo);
                 };
             } catch (error) {
@@ -123,34 +121,21 @@
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
             src.data.set(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
 
-            // 2. 画質を滑らかにしてカメラのザラザラ（ノイズ）を消す
+            // 2. 画質を滑らかにしてノイズを消す
             cv.GaussianBlur(src, dst, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
 
-            // 3. RGBからHSV色空間に変換（影や光の反射にめちゃくちゃ強くなる）
+            // 3. RGBからHSV色空間に変換
             cv.cvtColor(dst, hsv, cv.COLOR_RGBA2RGB);
             cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
 
-            // // 4. 赤色の範囲をピンポイント抽出（赤はHSVで両端に分かれるため2パターン合わせる）
-            // // [色相(0-180), 彩度(0-255), 明度(0-255)]
-            // let low1 = cv.matFromArray(3, 1, cv.CV_8U, [0, 70, 50]);
-            // let high1 = cv.matFromArray(3, 1, cv.CV_8U, [10, 255, 255]);
-            // let low2 = cv.matFromArray(3, 1, cv.CV_8U, [170, 70, 50]);
-            // let high2 = cv.matFromArray(3, 1, cv.CV_8U, [180, 255, 255]);
-
-            // 【黄緑（ライムグリーン）用に変更】
-            // 色相(H)を 35〜85（緑系）に絞り、彩度(S)と明度(V)を高めにして鮮やかな色だけを指定
+            // 4. 【最適化】鮮やかな黄緑（ライムグリーン）の範囲をピンポイント抽出
+            // 部屋の木目（茶色）や肌色のノイズを完全にスルーします
             let low = cv.matFromArray(3, 1, cv.CV_8U, [35, 80, 60]);
             let high = cv.matFromArray(3, 1, cv.CV_8U, [85, 255, 255]);
             
-            cv.inRange(hsv, low, high, mask); // 直接 mask に抽出
+            cv.inRange(hsv, low, high, mask);
             
             low.delete(); high.delete();
-
-            cv.inRange(hsv, low1, high1, mask1);
-            cv.inRange(hsv, low2, high2, mask2);
-            cv.bitwise_or(mask1, mask2, mask); // 2つの赤色マスクを合体
-
-            low1.delete(); high1.delete(); low2.delete(); high2.delete();
 
             // 5. 輪郭（塊）の抽出
             cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
@@ -163,15 +148,12 @@
                 let area = cv.contourArea(cnt);
                 let perimeter = cv.arcLength(cnt, true);
 
-                // 小さすぎるゴミノイズは無視
                 if (area > 50 && perimeter > 0) {
-                    // 数学的円形度の計算式： 4 * π * 面積 / (周囲の長さの2乗)
-                    // 完全な正円なら「1.0」になり、四角や複雑な形だと数値が下がる
+                    // 数学的円形度（1.0に近ければ綺麗な円）
                     let circularity = (4 * Math.PI * area) / (perimeter * perimeter);
 
-                    // 円形度が 0.65 以上（かなり綺麗な円形）のものだけを許可
+                    // 黄緑はノイズが少ないため、合格ラインは扱いやすい 0.65 に設定
                     if (circularity > 0.65) {
-                        // 塊の中心座標（重心）を計算
                         let M = cv.moments(cnt);
                         if (M.m00 !== 0) {
                             let cx = M.m10 / M.m00;
@@ -201,9 +183,9 @@
                 ctx.closePath();
                 ctx.stroke();
 
-                statusText.innerHTML = `<span style="color: #34c759;">🟢 ターゲットロック（OpenCV高精度検知）</span>`;
+                statusText.innerHTML = `<span style="color: #34c759;">🟢 ターゲットロック（黄緑マーカー4点検知）</span>`;
             } else {
-                statusText.innerHTML = `🔴 検出された赤丸: ${validCenters.length} / 4`;
+                statusText.innerHTML = `🔴 検出された黄緑の丸: ${validCenters.length} / 4`;
             }
 
             requestAnimationFrame(processVideo);
