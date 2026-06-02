@@ -3,11 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>閾値調整・強制テスト版</title>
+    <title>赤色マーカー検出（軽量版）</title>
     <style>
         body {
             margin: 0;
-            padding: 0;
             background-color: #111;
             font-family: sans-serif;
             color: white;
@@ -32,33 +31,6 @@
             border-radius: 8px;
             display: block;
         }
-        .controls {
-            width: 90%;
-            max-width: 640px;
-            margin-top: 15px;
-            background: #222;
-            padding: 15px;
-            border-radius: 8px;
-            box-sizing: border-box;
-        }
-        .slider-group {
-            display: flex;
-            align-items: center;
-            margin-bottom: 10px;
-        }
-        .slider-group label {
-            width: 120px;
-            font-size: 14px;
-        }
-        .slider-group input {
-            flex: 1;
-        }
-        .slider-group span {
-            width: 40px;
-            text-align: right;
-            font-size: 14px;
-            margin-left: 10px;
-        }
         button {
             margin: 20px;
             padding: 15px 30px;
@@ -74,36 +46,19 @@
             font-size: 16px;
             font-weight: bold;
             margin-bottom: 10px;
-            text-align: center;
         }
     </style>
 </head>
 <body>
 
-    <div id="status">ボタンを押してテストを開始してください</div>
+    <div id="status">ボタンを押してカメラを起動してください</div>
     
     <div class="container">
         <video id="camera-view" autoplay playsinline muted></video>
         <canvas id="canvas-output"></canvas>
     </div>
 
-    <button id="start-btn">カメラテスト起動</button>
-
-    <div class="controls">
-        <h3 style="margin-top:0; font-size:16px; color:#ff3b30;">🛠️ 赤色判定の感度調整</h3>
-        <div class="slider-group">
-            <label>赤の最低強さ:</label>
-            <input type="range" id="threshold-r" min="50" max="255" value="120">
-            <style></style>
-            <span id="val-r">120</span>
-        </div>
-        <div class="slider-group">
-            <label>他色との差（倍率）:</label>
-            <input type="range" id="threshold-ratio" min="10" max="25" value="14" step="1">
-            <span id="val-ratio">1.4</span>
-        </div>
-        <p style="font-size:12px; color:#aaa; margin:0;">※数値を下げると、暗い赤やオレンジっぽい場所も全部「赤」と判定して画面が反応します。</p>
-    </div>
+    <button id="start-btn">カメラ起動</button>
 
     <script>
         const video = document.getElementById('camera-view');
@@ -112,112 +67,90 @@
         const startBtn = document.getElementById('start-btn');
         const statusText = document.getElementById('status');
 
-        // スライダーの要素
-        const sliderR = document.getElementById('threshold-r');
-        const sliderRatio = document.getElementById('threshold-ratio');
-        const valR = document.getElementById('val-r');
-        const valRatio = document.getElementById('val-ratio');
-
-        let isProcessing = false;
-
-        // スライダー変更時に数値を表示
-        sliderR.addEventListener('input', (e) => valR.innerText = e.target.value);
-        sliderRatio.addEventListener('input', (e) => valRatio.innerText = (e.target.value / 10).toFixed(1));
+        // 固定しきい値（標準的な赤色検出設定）
+        const MIN_R = 120;
+        const RATIO = 1.4;
 
         startBtn.addEventListener('click', async () => {
             statusText.innerText = "カメラを起動中...";
             try {
-                // 最も一般的な背面カメラ設定で確実に起動
-                const constraints = {
+                const stream = await navigator.mediaDevices.getUserMedia({
                     audio: false,
                     video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
-                };
-                
-                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                });
                 video.srcObject = stream;
                 video.play();
-                
                 startBtn.style.display = 'none';
                 
                 video.onloadedmetadata = () => {
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
-                    isProcessing = true;
-                    statusText.innerText = "テスト作動中：赤を映してください";
+                    statusText.innerText = "赤色のマーカーを4つ映してください";
                     requestAnimationFrame(processVideo);
                 };
             } catch (error) {
-                alert("起動失敗: " + error.message);
+                statusText.innerText = "起動失敗: " + error.message;
             }
         });
 
         function processVideo() {
-            if (!isProcessing) return;
-
-            // 1. まず普通にカメラ映像をCanvasに映す（これで真っ暗は防げる）
+            // 1. カメラ映像をCanvasに描画
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
             // 2. ピクセルデータを取得
             const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
             const data = imgData.data;
 
-            // スライダーから現在のしきい値を取得
-            const minR = parseInt(sliderR.value);
-            const ratio = parseInt(sliderRatio.value) / 10;
-
-            let redPixels = [];
+            const redPixels = [];
             const distanceThreshold = Math.round(canvas.width * 0.08);
 
-            // 3. 全ピクセルをスキャン
+            // 3. 赤色ピクセルの抽出（16バイト＝4ピクセル飛ばしで高速走査）
             for (let i = 0; i < data.length; i += 16) {
                 const r = data[i];
                 const g = data[i + 1];
                 const b = data[i + 2];
 
-                // 赤色判定の計算式
-                if (r > minR && r > g * ratio && r > b * ratio) {
+                if (r > MIN_R && r > g * RATIO && r > b * RATIO) {
                     const pixelIndex = i / 4;
-                    const x = pixelIndex % canvas.width;
-                    const y = Math.floor(pixelIndex / canvas.width);
-                    redPixels.push({ x, y });
-
-                    // 【強制テスト表示】
-                    // プログラムが「ここを赤だ！」と認識したピクセルを、画面上で真っ青（#00ffff）に染め上げます。
-                    // これで、シールの場所が正しくプログラムに引っかかっているかが分かります。
-                    data[i] = 0;       // Rをゼロに
-                    data[i + 1] = 255; // Gをマックスに
-                    data[i + 2] = 255; // Bをマックスに
+                    redPixels.push({
+                        x: pixelIndex % canvas.width,
+                        y: Math.floor(pixelIndex / canvas.width)
+                    });
                 }
             }
 
-            // 染め上げたピクセルデータを画面に一回書き戻して、強制的に見せる
-            ctx.putImageData(imgData, 0, 0);
-
-            // 4. 塊（クラスター）にする処理
-            let clusters = [];
+            // 4. 近しいピクセルをまとめて塊（クラスター）にする処理
+            const clusters = [];
             redPixels.forEach(p => {
                 let foundCluster = false;
                 for (let c of clusters) {
                     if (Math.abs(c.x - p.x) < distanceThreshold && Math.abs(c.y - p.y) < distanceThreshold) {
-                        c.xs.push(p.x); c.ys.push(p.y);
-                        c.x = (c.x + p.x) / 2; c.y = (c.y + p.y) / 2;
-                        foundCluster = true; break;
+                        c.xs.push(p.x); 
+                        c.ys.push(p.y);
+                        c.x = c.xs.reduce((sum, val) => sum + val, 0) / c.xs.length;
+                        c.y = c.ys.reduce((sum, val) => sum + val, 0) / c.ys.length;
+                        foundCluster = true; 
+                        break;
                     }
                 }
                 if (!foundCluster) clusters.push({ x: p.x, y: p.y, xs: [p.x], ys: [p.y] });
             });
 
+            // ノイズ除去（あまりに小さい塊は無視）
             const minPixelsPerMark = Math.round(canvas.width * 0.005);
             const validClusters = clusters.filter(c => c.xs.length > minPixelsPerMark);
             
-            // 5. 4つの点がある場合は、それらを結ぶ赤い線を描画
+            // 5. 4つの塊が検出された場合のみ、四角い枠線を引く
             if (validClusters.length === 4) {
-                // Y座標→X座標で簡易ソートして時計回りに
+                // 上下の判定（Y座標でソート）
                 validClusters.sort((a, b) => a.y - b.y);
-                let topTwo = [validClusters[0], validClusters[1]].sort((a, b) => a.x - b.x);
-                let bottomTwo = [validClusters[2], validClusters[3]].sort((a, b) => a.x - b.x);
+                const topTwo = [validClusters[0], validClusters[1]].sort((a, b) => a.x - b.x);
+                const bottomTwo = [validClusters[2], validClusters[3]].sort((a, b) => a.x - b.x);
+                
+                // 時計回りの順序（左上 -> 右上 -> 右下 -> 左下）
                 const pts = [topTwo[0], topTwo[1], bottomTwo[1], bottomTwo[0]];
 
+                // 四角形を描画
                 ctx.strokeStyle = '#ff3b30';
                 ctx.lineWidth = 5;
                 ctx.beginPath();
@@ -228,9 +161,9 @@
                 ctx.closePath();
                 ctx.stroke();
 
-                statusText.innerHTML = `<span style="color: #34c759;">🟢 4つの点を確認・線で結びました！</span>`;
+                statusText.innerHTML = `<span style="color: #34c759;">🟢 4点認識完了（ターゲットをロックしました）</span>`;
             } else {
-                statusText.innerHTML = `🔴 検出された赤の塊: ${validClusters.length} 個 (スライダーを左右に動かして調整してください)`;
+                statusText.innerHTML = `🔴 検出数: ${validClusters.length} / 4 (赤色の塊を4つ認識させてください)`;
             }
 
             requestAnimationFrame(processVideo);
