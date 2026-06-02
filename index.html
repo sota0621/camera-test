@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出 ➔ カメラ起動</title>
+    <title>黄緑色マーカー検出 ➔ ボタン押して撮影</title>
     <style>
         body {
             margin: 0;
@@ -27,48 +27,72 @@
         canvas {
             width: 100%;
             height: auto;
-            border: 2px solid #34c759;
+            border: 2px solid #555;
             border-radius: 8px;
             display: block;
+            transition: border-color 0.3s;
         }
-        button {
+        /* 4点ロック時のキャンバス枠線 */
+        canvas.locked {
+            border-color: #34c759;
+            box-shadow: 0 0 15px rgba(52, 199, 89, 0.5);
+        }
+        .btn {
             margin: 20px;
             padding: 15px 30px;
             font-size: 18px;
-            background-color: #34c759;
             color: white;
             border: none;
             border-radius: 8px;
             cursor: pointer;
             font-weight: bold;
+            transition: all 0.3s;
         }
-        button:disabled {
+        #start-btn {
+            background-color: #007aff;
+        }
+        #start-btn:disabled {
             background-color: #555;
             cursor: not-allowed;
+        }
+        /* 【新設】撮影開始ボタン（デフォルトは非表示） */
+        #shoot-btn {
+            background-color: #34c759;
+            display: none;
+            animation: pulse 1.5s infinite;
+        }
+        #shoot-btn:active {
+            transform: scale(0.95);
         }
         #status {
             font-size: 16px;
             font-weight: bold;
             margin-bottom: 10px;
             text-align: center;
+            min-height: 24px;
         }
-        /* カメラアプリ起動用の隠しインプット */
         #camera-trigger {
             display: none;
+        }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(52, 199, 89, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0); }
         }
     </style>
     <script async src="https://docs.opencv.org/4.x/opencv.js" id="opencv-src"></script>
 </head>
 <body>
 
-    <div id="status">OpenCV.jsを読み込んでいます（数秒かかります）...</div>
+    <div id="status">OpenCV.jsを読み込んでいます...</div>
     
     <div class="container">
         <video id="camera-view" autoplay playsinline muted></video>
         <canvas id="canvas-output"></canvas>
     </div>
 
-    <button id="start-btn" disabled>システム開始</button>
+    <button id="start-btn" class="btn" disabled>システム開始</button>
+    <button id="shoot-btn" class="btn">📸 撮影開始できます</button>
 
     <input type="file" id="camera-trigger" accept="image/*" capture="environment">
 
@@ -77,19 +101,19 @@
         const canvas = document.getElementById('canvas-output');
         const ctx = canvas.getContext('2d');
         const startBtn = document.getElementById('start-btn');
+        const shootBtn = document.getElementById('shoot-btn');
         const statusText = document.getElementById('status');
         const cameraTrigger = document.getElementById('camera-trigger');
 
         let src, dst, hsv, mask, contours, hierarchy;
         let isProcessing = false;
         
-        // 安定検知用のカウンター（チラつきでの暴発を防ぐ）
         let lockCounter = 0;
-        const REQUIRED_FRAMES = 30; // 4点検知が30フレーム（約1秒）継続したらカメラ起動
+        const REQUIRED_FRAMES = 15; // 約0.5秒間安定したらボタンを表示
 
         // OpenCV.js の読み込み完了を待つ
         document.getElementById('opencv-src').addEventListener('load', () => {
-            statusText.innerText = "準備完了！ボタンを押して開始してください";
+            statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
             startBtn.disabled = false;
         });
 
@@ -116,7 +140,7 @@
                     hierarchy = new cv.Mat();
 
                     isProcessing = true;
-                    statusText.innerText = "黄緑の丸4つを枠内に収めてください";
+                    statusText.innerText = "黄緑の丸4つを画面内に収めてください";
                     requestAnimationFrame(processVideo);
                 };
             } catch (error) {
@@ -124,12 +148,23 @@
             }
         });
 
-        // カメラアプリで撮影が完了したときのイベント（確認用）
+        // ユーザーが「撮影開始できます」ボタンを押した時
+        shootBtn.addEventListener('click', () => {
+            isProcessing = false; // カメラアプリ起動中は裏の解析を止める
+            cameraTrigger.click(); // スマホの標準カメラを呼び出す
+        });
+
+        // ネイティブカメラでの撮影が完了してブラウザに戻ってきた時
         cameraTrigger.addEventListener('change', (e) => {
             if (e.target.files.length > 0) {
-                statusText.innerHTML = `<span style="color: #34c759;">📸 写真の撮影・取り込みが完了しました！</span>`;
-                // 必要に応じて、ここで撮影された画像（e.target.files[0]）をサーバーに送るなどの処理ができます
+                statusText.innerHTML = `<span style="color: #34c759;">🎉 写真の取り込みに成功しました！</span>`;
             }
+            // スキャンループを再開
+            lockCounter = 0;
+            shootBtn.style.display = 'none';
+            canvas.classList.remove('locked');
+            isProcessing = true;
+            requestAnimationFrame(processVideo);
         });
 
         function processVideo() {
@@ -142,7 +177,7 @@
             cv.cvtColor(dst, hsv, cv.COLOR_RGBA2RGB);
             cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
 
-            // 鮮やかな黄緑（ライムグリーン）の抽出
+            // 黄緑（ライムグリーン）の抽出
             let low = cv.matFromArray(3, 1, cv.CV_8U, [35, 80, 60]);
             let high = cv.matFromArray(3, 1, cv.CV_8U, [85, 255, 255]);
             cv.inRange(hsv, low, high, mask);
@@ -169,16 +204,16 @@
                 cnt.delete();
             }
 
-            // 4点検知の判定
+            // 4つのマーカーが綺麗に見つかっているか？
             if (validCenters.length === 4) {
-                lockCounter++; // 安定検知カウンターを進める
+                lockCounter++;
 
                 validCenters.sort((a, b) => a.y - b.y);
                 let topTwo = [validCenters[0], validCenters[1]].sort((a, b) => a.x - b.x);
                 let bottomTwo = [validCenters[2], validCenters[3]].sort((a, b) => a.x - b.x);
                 const pts = [topTwo[0], topTwo[1], bottomTwo[1], bottomTwo[0]];
 
-                // 緑色の枠線を描画
+                // 緑の四角い枠線を描画
                 ctx.strokeStyle = '#34c759';
                 ctx.lineWidth = 5;
                 ctx.beginPath();
@@ -189,29 +224,20 @@
                 ctx.closePath();
                 ctx.stroke();
 
-                // カウント状況をプログレス風に表示
-                let progress = Math.min(100, Math.round((lockCounter / REQUIRED_FRAMES) * 100));
-                statusText.innerHTML = `<span style="color: #34c759;">🟢 領域確認中... (${progress}%)</span>`;
-
-                // 指定フレームの間、安定して領域が確認できたらトリガー発火
+                // 安定時間が基準を超えたら、緑色のボタンをポップアップ
                 if (lockCounter >= REQUIRED_FRAMES) {
-                    isProcessing = false; // 高速連打・多重起動を防ぐため一旦画像解析をストップ
-                    statusText.innerHTML = `<span style="color: #34c759;">🟢 領域確定！カメラを起動します...</span>`;
-                    
-                    // スマホのネイティブカメラを自動クリックで起動
-                    setTimeout(() => {
-                        cameraTrigger.click();
-                        // カメラアプリが閉じられたら再度検知に戻れるようにカウンターをリセット
-                        lockCounter = 0;
-                        isProcessing = true;
-                        requestAnimationFrame(processVideo);
-                    }, 500); 
-                    return;
+                    canvas.classList.add('locked');
+                    shootBtn.style.display = 'block'; // ボタン出現
+                    statusText.innerHTML = `<span style="color: #34c759;">🟢 領域をロックしました。撮影ボタンを押してください</span>`;
+                } else {
+                    statusText.innerHTML = `🟡 領域を確認中...`;
                 }
             } else {
-                // 4点揃わなくなったらカウンターをゼロにリセット（厳格化）
+                // 4点見失ったら、撮影不可にするため即座にボタンを引っ込める
                 lockCounter = 0;
-                statusText.innerHTML = `🔴 マーカーをスキャン中... (検出数: ${validCenters.length} / 4)`;
+                shootBtn.style.display = 'none';
+                canvas.classList.remove('locked');
+                statusText.innerHTML = `🔍 マーカーを探しています... (${validCenters.length} / 4)`;
             }
 
             requestAnimationFrame(processVideo);
