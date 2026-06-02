@@ -68,8 +68,8 @@
         const statusText = document.getElementById('status');
 
         // 固定しきい値
-        const MIN_R = 120;
-        const RATIO = 1.4;
+        const MIN_R = 90;
+        const RATIO = 1.15;
 
         startBtn.addEventListener('click', async () => {
             statusText.innerText = "カメラを起動中...";
@@ -152,14 +152,14 @@
 
                 // 指標①：縦横比（正円なら 1.0 に近くなる）
                 const aspectRatio = width / height;
-                if (aspectRatio < 0.7 || aspectRatio > 1.3) return false;
+                if (aspectRatio < 0.85 || aspectRatio > 1.18) return false;
 
                 // 指標②：充填率（外接四角形に対してピクセルがどれだけ詰まっているか）
                 // 正円の理想値は π/4 ≒ 0.785 (78.5%)。サンプリング間引き(i+=16)を考慮し範囲を設定
                 const boxArea = (width * height) / 4; // 4ピクセル飛ばし走査のため面積を1/4で補正
                 const fillRatio = c.xs.length / boxArea;
                 
-                if (fillRatio < 0.50 || fillRatio > 0.95) return false;
+                if (fillRatio < 0.60 || fillRatio > 0.88) return false;
 
                 return true; // 縦横比・充填率ともにクリアしたものを「円」とみなす
             });
