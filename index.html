@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>赤色マーカー検出（軽量版）</title>
+    <title>赤色円形マーカー検出</title>
     <style>
         body {
             margin: 0;
@@ -67,7 +67,7 @@
         const startBtn = document.getElementById('start-btn');
         const statusText = document.getElementById('status');
 
-        // 固定しきい値（標準的な赤色検出設定）
+        // 固定しきい値
         const MIN_R = 120;
         const RATIO = 1.4;
 
@@ -85,7 +85,7 @@
                 video.onloadedmetadata = () => {
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
-                    statusText.innerText = "赤色のマーカーを4つ映してください";
+                    statusText.innerText = "円形の赤マーカーを4つ映してください";
                     requestAnimationFrame(processVideo);
                 };
             } catch (error) {
@@ -94,17 +94,15 @@
         });
 
         function processVideo() {
-            // 1. カメラ映像をCanvasに描画
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-            // 2. ピクセルデータを取得
             const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
             const data = imgData.data;
 
             const redPixels = [];
             const distanceThreshold = Math.round(canvas.width * 0.08);
 
-            // 3. 赤色ピクセルの抽出（16バイト＝4ピクセル飛ばしで高速走査）
+            // 1. 赤色ピクセルの抽出（高速化走査）
             for (let i = 0; i < data.length; i += 16) {
                 const r = data[i];
                 const g = data[i + 1];
@@ -119,7 +117,7 @@
                 }
             }
 
-            // 4. 近しいピクセルをまとめて塊（クラスター）にする処理
+            // 2. クラスタリング（塊にグループ化）
             const clusters = [];
             redPixels.forEach(p => {
                 let foundCluster = false;
@@ -136,22 +134,45 @@
                 if (!foundCluster) clusters.push({ x: p.x, y: p.y, xs: [p.x], ys: [p.y] });
             });
 
-            // ノイズ除去（あまりに小さい塊は無視）
+            // 3. 【新設】「円形度」によるフィルタリング
             const minPixelsPerMark = Math.round(canvas.width * 0.005);
-            const validClusters = clusters.filter(c => c.xs.length > minPixelsPerMark);
             
-            // 5. 4つの塊が検出された場合のみ、四角い枠線を引く
-            if (validClusters.length === 4) {
-                // 上下の判定（Y座標でソート）
-                validClusters.sort((a, b) => a.y - b.y);
-                const topTwo = [validClusters[0], validClusters[1]].sort((a, b) => a.x - b.x);
-                const bottomTwo = [validClusters[2], validClusters[3]].sort((a, b) => a.x - b.x);
+            const circleClusters = clusters.filter(c => {
+                // 最低限のピクセル数がないものは除外
+                if (c.xs.length < minPixelsPerMark) return false;
+
+                // 塊の外接矩形（幅と高さ）を計算
+                const minX = Math.min(...c.xs);
+                const maxX = Math.max(...c.xs);
+                const minY = Math.min(...c.ys);
+                const maxY = Math.max(...c.ys);
                 
-                // 時計回りの順序（左上 -> 右上 -> 右下 -> 左下）
+                const width = maxX - minX + 1;
+                const height = maxY - minY + 1;
+
+                // 指標①：縦横比（正円なら 1.0 に近くなる）
+                const aspectRatio = width / height;
+                if (aspectRatio < 0.7 || aspectRatio > 1.3) return false;
+
+                // 指標②：充填率（外接四角形に対してピクセルがどれだけ詰まっているか）
+                // 正円の理想値は π/4 ≒ 0.785 (78.5%)。サンプリング間引き(i+=16)を考慮し範囲を設定
+                const boxArea = (width * height) / 4; // 4ピクセル飛ばし走査のため面積を1/4で補正
+                const fillRatio = c.xs.length / boxArea;
+                
+                if (fillRatio < 0.50 || fillRatio > 0.95) return false;
+
+                return true; // 縦横比・充填率ともにクリアしたものを「円」とみなす
+            });
+            
+            // 4. 厳選された円形の塊が「4つ」ある場合のみ、四角い枠線を引く
+            if (circleClusters.length === 4) {
+                circleClusters.sort((a, b) => a.y - b.y);
+                const topTwo = [circleClusters[0], circleClusters[1]].sort((a, b) => a.x - b.x);
+                const bottomTwo = [circleClusters[2], circleClusters[3]].sort((a, b) => a.x - b.x);
+                
                 const pts = [topTwo[0], topTwo[1], bottomTwo[1], bottomTwo[0]];
 
-                // 四角形を描画
-                ctx.strokeStyle = '#ff3b30';
+                ctx.strokeStyle = '#34c759'; // ロック時は緑線に変更
                 ctx.lineWidth = 5;
                 ctx.beginPath();
                 ctx.moveTo(pts[0].x, pts[0].y);
@@ -161,9 +182,9 @@
                 ctx.closePath();
                 ctx.stroke();
 
-                statusText.innerHTML = `<span style="color: #34c759;">🟢 4点認識完了（ターゲットをロックしました）</span>`;
+                statusText.innerHTML = `<span style="color: #34c759;">🟢 円形マーカー4点認識完了</span>`;
             } else {
-                statusText.innerHTML = `🔴 検出数: ${validClusters.length} / 4 (赤色の塊を4つ認識させてください)`;
+                statusText.innerHTML = `🔴 検出された円形の赤: ${circleClusters.length} / 4 (背景のノイズは無視しています)`;
             }
 
             requestAnimationFrame(processVideo);
