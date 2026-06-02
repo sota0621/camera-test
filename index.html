@@ -130,12 +130,21 @@
             cv.cvtColor(dst, hsv, cv.COLOR_RGBA2RGB);
             cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
 
-            // 4. 赤色の範囲をピンポイント抽出（赤はHSVで両端に分かれるため2パターン合わせる）
-            // [色相(0-180), 彩度(0-255), 明度(0-255)]
-            let low1 = cv.matFromArray(3, 1, cv.CV_8U, [0, 70, 50]);
-            let high1 = cv.matFromArray(3, 1, cv.CV_8U, [10, 255, 255]);
-            let low2 = cv.matFromArray(3, 1, cv.CV_8U, [170, 70, 50]);
-            let high2 = cv.matFromArray(3, 1, cv.CV_8U, [180, 255, 255]);
+            // // 4. 赤色の範囲をピンポイント抽出（赤はHSVで両端に分かれるため2パターン合わせる）
+            // // [色相(0-180), 彩度(0-255), 明度(0-255)]
+            // let low1 = cv.matFromArray(3, 1, cv.CV_8U, [0, 70, 50]);
+            // let high1 = cv.matFromArray(3, 1, cv.CV_8U, [10, 255, 255]);
+            // let low2 = cv.matFromArray(3, 1, cv.CV_8U, [170, 70, 50]);
+            // let high2 = cv.matFromArray(3, 1, cv.CV_8U, [180, 255, 255]);
+
+            // 【黄緑（ライムグリーン）用に変更】
+            // 色相(H)を 35〜85（緑系）に絞り、彩度(S)と明度(V)を高めにして鮮やかな色だけを指定
+            let low = cv.matFromArray(3, 1, cv.CV_8U, [35, 80, 60]);
+            let high = cv.matFromArray(3, 1, cv.CV_8U, [85, 255, 255]);
+            
+            cv.inRange(hsv, low, high, mask); // 直接 mask に抽出
+            
+            low.delete(); high.delete();
 
             cv.inRange(hsv, low1, high1, mask1);
             cv.inRange(hsv, low2, high2, mask2);
