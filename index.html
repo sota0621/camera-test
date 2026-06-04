@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出 ➔ カメラ切り替え機能付き</title>
+    <title>黄緑色マーカー検出 ➔ ボタン押して撮影</title>
     <style>
         body {
             margin: 0;
@@ -32,12 +32,13 @@
             display: block;
             transition: border-color 0.3s;
         }
+        /* 4点ロック時のキャンバス枠線 */
         canvas.locked {
             border-color: #34c759;
             box-shadow: 0 0 15px rgba(52, 199, 89, 0.5);
         }
         .btn {
-            margin: 10px;
+            margin: 20px;
             padding: 15px 30px;
             font-size: 18px;
             color: white;
@@ -54,6 +55,7 @@
             background-color: #555;
             cursor: not-allowed;
         }
+        /* 撮影開始ボタン（デフォルトは非表示） */
         #shoot-btn {
             background-color: #34c759;
             display: none;
@@ -61,30 +63,6 @@
         }
         #shoot-btn:active {
             transform: scale(0.95);
-        }
-        /* 【新設】カメラ切り替えボタンのコンテナ */
-        #camera-selector {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
-            margin: 10px;
-            max-width: 90%;
-        }
-        .cam-toggle-btn {
-            background-color: #444;
-            color: #fff;
-            border: 1px solid #666;
-            padding: 8px 16px;
-            margin: 5px;
-            border-radius: 20px;
-            font-size: 14px;
-            cursor: pointer;
-        }
-        .cam-toggle-btn.active {
-            background-color: #30d158;
-            border-color: #30d158;
-            color: #000;
-            font-weight: bold;
         }
         #status {
             font-size: 16px;
@@ -108,8 +86,6 @@
 
     <div id="status">OpenCV.jsを読み込んでいます...</div>
     
-    <div id="camera-selector"></div>
-
     <div class="container">
         <video id="camera-view" autoplay playsinline muted></video>
         <canvas id="canvas-output"></canvas>
@@ -128,15 +104,12 @@
         const shootBtn = document.getElementById('shoot-btn');
         const statusText = document.getElementById('status');
         const cameraTrigger = document.getElementById('camera-trigger');
-        const cameraSelector = document.getElementById('camera-selector');
 
         let src, dst, hsv, mask, contours, hierarchy;
         let isProcessing = false;
-        let currentStream = null;
-        let videoDevices = []; // 認識したカメラのリスト
         
         let lockCounter = 0;
-        const REQUIRED_FRAMES = 15;
+        const REQUIRED_FRAMES = 15; // 約0.5秒間安定したらボタンを表示
 
         // OpenCV.js の読み込み完了を待つ
         document.getElementById('opencv-src').addEventListener('load', () => {
@@ -144,114 +117,108 @@
             startBtn.disabled = false;
         });
 
-        // システム開始ボタン
         startBtn.addEventListener('click', async () => {
-            statusText.innerText = "カメラの一覧を取得中...";
+            statusText.innerText = "広角スキャン用カメラを探索中...";
             try {
-                // 1. 最初に権限を取得（これがないとデバイスのIDや名前がブラウザから見えない）
-                const initStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-                initStream.getTracks().forEach(track => track.stop()); // 一旦止める
+                // 1. まず通常の背面カメラで権限を取得（これがないとデバイス一覧の「名前」が取れない）
+                const initStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: 'environment' } 
+                });
+                // 一旦カメラリストを取得するために、初期ストリームのトラックを即時停止
+                initStream.getTracks().forEach(track => track.stop());
 
-                // 2. 利用可能な全カメラを取得
+                // 2. 利用可能な全カメラデバイスを取得
                 const devices = await navigator.mediaDevices.enumerateDevices();
-                videoDevices = devices.filter(device => device.kind === 'videoinput');
+                const videoDevices = devices.filter(device => device.kind === 'videoinput');
 
-                if (videoDevices.length === 0) {
-                    throw new Error("有効なカメラが見つかりません。");
+                let targetDeviceId = null;
+
+                // 3. 広角（0.5x）カメラの絞り込みロジック
+                // キーワード（ultra, wide, 0.5, 超広角）が名前に含まれるものを最優先
+                const wideDevice = videoDevices.find(d => {
+                    const label = d.label.toLowerCase();
+                    return label.includes('ultra') || label.includes('wide') || label.includes('0.5') || label.includes('超広角');
+                });
+
+                if (wideDevice) {
+                    targetDeviceId = wideDevice.deviceId;
+                    console.log("広角レンズを検出しました: " + wideDevice.label);
+                } else if (videoDevices.length > 1) {
+                    // 名前にキーワードがなくても、カメラが複数ある場合は「最後のカメラ」が超広角（またはインカメラ以外の一番広い画角）であることが多いため、それを採用
+                    targetDeviceId = videoDevices[videoDevices.length - 1].deviceId;
+                    console.log("カメラ名から判別不能なため、末尾のカメラIDを適用します。");
                 }
 
-                // 3. カメラ選択ボタンを生成
-                createCameraButtons();
-
-                // 4. 初期カメラ（0番）で起動
-                startBtn.style.display = 'none';
-                await bootCamera(0);
-
-            } catch (error) {
-                statusText.innerText = "起動失敗: " + error.message;
-            }
-        });
-
-        // カメラ切り替えボタンを動的に作る関数
-        function createCameraButtons() {
-            cameraSelector.innerHTML = ''; // クリア
-            videoDevices.forEach((device, index) => {
-                const button = document.createElement('button');
-                button.className = 'cam-toggle-btn';
-                // iPhone等で名前が隠されている場合は「カメラ 0 (背面)」のように表示
-                const label = device.label || `カメラ ${index}`;
-                button.innerText = `📷 ${label}`;
-                
-                button.addEventListener('click', () => {
-                    if (isProcessing) {
-                        bootCamera(index);
-                    }
-                });
-                cameraSelector.appendChild(button);
-            });
-        }
-
-        // 指定されたインデックス（番号）のカメラを起動する関数
-        async function bootCamera(index) {
-            isProcessing = false; // ストリーム切り替え中は解析を止める
-            shootBtn.style.display = 'none';
-            canvas.classList.remove('locked');
-            lockCounter = 0;
-
-            // 稼働中のカメラがあればトラックをすべて完全に停止させる
-            if (currentStream) {
-                currentStream.getTracks().forEach(track => track.stop());
-            }
-
-            statusText.innerText = `カメラ番号 [ ${index} ] を起動中...`;
-
-            // ボタンの「アクティブ表示」を切り替え
-            const buttons = cameraSelector.querySelectorAll('.cam-toggle-btn');
-            buttons.forEach((btn, idx) => {
-                if (idx === index) btn.classList.add('active');
-                else btn.classList.remove('active');
-            });
-
-            try {
-                // 選択された番号のデバイスIDを指定
+                // 4. 指定したカメラID（または標準背面）でストリームを開始
                 const constraints = {
                     audio: false,
                     video: {
-                        deviceId: { exact: videoDevices[index].deviceId },
                         width: { ideal: 640 },
                         height: { ideal: 480 }
                     }
                 };
 
+                if (targetDeviceId) {
+                    constraints.video.deviceId = { exact: targetDeviceId };
+                } else {
+                    constraints.video.facingMode = 'environment';
+                }
+
                 const stream = await navigator.mediaDevices.getUserMedia(constraints);
-                currentStream = stream;
+                
+                // 5. Android Chromeなどの一部環境向け：ズーム倍率を最小（広角側）に強制設定する処理
+                const videoTrack = stream.getVideoTracks()[0];
+                const capabilities = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
+                
+                // ブラウザがズーム機能に対応している場合、最小値（0.5など）に設定
+                if (capabilities.zoom) {
+                    try {
+                        await videoTrack.applyConstraints({
+                            advanced: [{ zoom: capabilities.zoom.min }]
+                        });
+                        console.log("ズーム倍率を最小に設定しました: " + capabilities.zoom.min);
+                    } catch (e) {
+                        console.warn("ズーム倍率の設定に失敗しました: ", e);
+                    }
+                }
+
                 video.srcObject = stream;
                 video.play();
-
-                // カメラのメタデータが読み込まれたらOpenCVの準備（初回のみ領域確保）
+                startBtn.style.display = 'none';
+                
                 video.onloadedmetadata = () => {
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
                     
-                    if (!src) {
-                        src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-                        dst = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-                        hsv = new cv.Mat();
-                        mask = new cv.Mat();
-                        contours = new cv.MatVector();
-                        hierarchy = new cv.Mat();
-                    }
+                    src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+                    dst = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+                    hsv = new cv.Mat();
+                    mask = new cv.Mat();
+                    contours = new cv.MatVector();
+                    hierarchy = new cv.Mat();
 
                     isProcessing = true;
-                    statusText.innerText = "黄緑の丸4つを画面内に収めてください";
+                    statusText.innerText = "黄緑の丸4つを画面内に収めてください（広角モード）";
                     requestAnimationFrame(processVideo);
                 };
-
             } catch (error) {
-                statusText.innerText = `カメラ [${index}] の起動に失敗: ` + error.message;
-                isProcessing = true; // ループのフリーズを防ぐ
+                statusText.innerText = "カメラ起動失敗: " + error.message + " (通常の背面カメラで再試行します)";
+                // 万が一エラーが出た場合は、通常の背面カメラでフォールバック起動
+                try {
+                    const fallbackStream = await navigator.mediaDevices.getUserMedia({
+                        audio: false,
+                        video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
+                    });
+                    video.srcObject = fallbackStream;
+                    video.play();
+                    startBtn.style.display = 'none';
+                    isProcessing = true;
+                    requestAnimationFrame(processVideo);
+                } catch (fallbackError) {
+                    statusText.innerText = "完全な起動失敗: " + fallbackError.message;
+                }
             }
-        }
+        });
 
         // ユーザーが「撮影開始できます」ボタンを押した時
         shootBtn.addEventListener('click', () => {
@@ -299,8 +266,8 @@
 
                 if (area > 50 && perimeter > 0) {
                     let circularity = (4 * Math.PI * area) / (perimeter * perimeter);
-                    // 広角レンズの歪みを考慮し、真円度の閾値を少し緩和（0.55）
-                    if (circularity > 0.55) {
+                    // 広角レンズの歪みを考慮し、真円度の閾値を「0.65」から「0.55」に少し緩和
+                    if (circularity > 0.55) { 
                         let M = cv.moments(cnt);
                         if (M.m00 !== 0) {
                             validCenters.push({ x: M.m10 / M.m00, y: M.m01 / M.m00 });
@@ -310,6 +277,7 @@
                 cnt.delete();
             }
 
+            // 4つのマーカーが綺麗に見つかっているか？
             if (validCenters.length === 4) {
                 lockCounter++;
 
@@ -318,6 +286,7 @@
                 let bottomTwo = [validCenters[2], validCenters[3]].sort((a, b) => a.x - b.x);
                 const pts = [topTwo[0], topTwo[1], bottomTwo[1], bottomTwo[0]];
 
+                // 緑の四角い枠線を描画
                 ctx.strokeStyle = '#34c759';
                 ctx.lineWidth = 5;
                 ctx.beginPath();
@@ -328,14 +297,16 @@
                 ctx.closePath();
                 ctx.stroke();
 
+                // 安定時間が基準を超えたら、緑色のボタンをポップアップ
                 if (lockCounter >= REQUIRED_FRAMES) {
                     canvas.classList.add('locked');
-                    shootBtn.style.display = 'block';
+                    shootBtn.style.display = 'block'; // ボタン出現
                     statusText.innerHTML = `<span style="color: #34c759;">🟢 領域をロックしました。撮影ボタンを押してください</span>`;
                 } else {
                     statusText.innerHTML = `🟡 領域を確認中...`;
                 }
             } else {
+                // 4点見失ったら、撮影不可にするため即座にボタンを引っ込める
                 lockCounter = 0;
                 shootBtn.style.display = 'none';
                 canvas.classList.remove('locked');
