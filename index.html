@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出（自動小分け録画・完全自動版）</title>
+    <title>黄緑色マーカー検出（自動小分け・終了ボタン付き）</title>
     <style>
         body {
             margin: 0;
@@ -62,6 +62,11 @@
             background-color: #555;
             cursor: not-allowed;
         }
+        /* 録画が自動スタートしたときに出現する終了ボタン */
+        #stop-btn {
+            background-color: #ff3b30; /* 赤色 */
+            display: none; 
+        }
         #status {
             font-size: 16px;
             font-weight: bold;
@@ -84,6 +89,7 @@
 
     <div class="btn-container">
         <button id="start-btn" class="btn" disabled>システム開始</button>
+        <button id="stop-btn" class="btn">⏹ 録画を終了して保存</button>
     </div>
 
     <script>
@@ -91,6 +97,7 @@
         const canvas = document.getElementById('canvas-output');
         const ctx = canvas.getContext('2d');
         const startBtn = document.getElementById('start-btn');
+        const stopBtn = document.getElementById('stop-btn');
         const statusText = document.getElementById('status');
 
         let src, dst, hsv, mask, contours, hierarchy;
@@ -103,12 +110,11 @@
         let mediaRecorder;
         let recordedChunks = [];
         let isRecording = false;
-        let partCounter = 1;         // 動画のパート番号
-        let chunkTimerId = null;     // 自動小分け用のタイマー
+        let partCounter = 1;         
+        let chunkTimerId = null;     
 
         // ⏳ 小分けする時間の設定（ミリ秒）
-        // 実験本番時は [5分 = 300000] にしてください。
-        // 最初はテストとして、正しく自動保存されるか確認するために [30秒 = 30000] などに書き換えて試すのをおすすめします。
+        // 5分 = 300000 / テスト時は 30000 (30秒) などに調整してください
         const CHUNK_DURATION = 300000; 
 
         document.getElementById('opencv-src').addEventListener('load', () => {
@@ -153,7 +159,7 @@
 
                 const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 
-                // 0.5倍固定（初期ズームを最小値に設定）
+                // 0.5倍固定
                 const videoTrack = stream.getVideoTracks()[0];
                 const capabilities = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
                 
@@ -182,7 +188,6 @@
                     contours = new cv.MatVector();
                     hierarchy = new cv.Mat();
 
-                    // Canvasから映像ストリームをキャプチャ（30fps）
                     const canvasStream = canvas.captureStream(30);
                     
                     let options = { mimeType: 'video/mp4; codecs=avc1' };
@@ -201,7 +206,6 @@
                         }
                     };
 
-                    // 動画が停止（区切られた）したときの保存処理
                     mediaRecorder.onstop = () => {
                         const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'video/mp4' });
                         recordedChunks = [];
@@ -209,18 +213,23 @@
                         const a = document.createElement('a');
                         a.href = url;
                         const nowTime = new Date().toISOString().replace(/[:.]/g, '-');
-                        // ファイル名に「partX」をつけて判別しやすくします
                         a.download = `experiment-video-part${partCounter}-${nowTime}.mp4`;
                         document.body.appendChild(a);
                         a.click();
                         document.body.removeChild(a);
                         URL.revokeObjectURL(url);
                         
-                        partCounter++; // 次のパーツ番号へ
+                        partCounter++; 
 
-                        // もし大元の録画フラグがまだ生きていれば、即座に次の録画を裏で再開する（シームレス接続）
+                        // ユーザーが手動停止ボタンを押していなければ（＝isRecordingがtrueなら）次の録画を自動再開
                         if (isRecording) {
                             mediaRecorder.start();
+                        } else {
+                            // 手動停止された場合はシステムを初期状態に戻す
+                            stopBtn.style.display = 'none';
+                            canvas.classList.remove('locked');
+                            lockCounter = 0;
+                            statusText.innerHTML = `<span style="color: #34c759;">🎬 実験終了：すべての動画を保存しました</span>`;
                         }
                     };
 
@@ -233,24 +242,29 @@
             }
         });
 
-        // 🔄 指定時間ごとに録画を区切って自動保存をループさせる関数
+        // 🔄 タイマーによる自動小分け処理
         function startChunkSplitter() {
             chunkTimerId = setInterval(() => {
                 if (isRecording && mediaRecorder.state === "recording") {
-                    // 一度レコーダーを止め、onstopイベントを発生させてダウンロードを実行。
-                    // その後、onstop内のロジックで自動的に次のpartの録画が再開されます。
                     mediaRecorder.stop();
                 }
             }, CHUNK_DURATION);
         }
 
+        // ⏹ ユーザーが手動で「録画終了」を押した時のイベント
+        stopBtn.addEventListener('click', () => {
+            if (isRecording) {
+                isRecording = false; // 先にフラグを折ることで、onstop内での自動再開ループを防止
+                clearInterval(chunkTimerId); // タイマーも破棄
+                mediaRecorder.stop(); // 撮影中の最後のパーツを止めて保存へ
+            }
+        });
+
         function processVideo() {
             if (!isProcessing) return;
 
-            // カメラ映像をキャンバスに100%描画（録画されるベース映像）
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-            // 録画がまだ始まっていない（安定待ち中）の場合のみ、マーカーの解析と線・文字の描画を行う
             if (!isRecording) {
                 src.data.set(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
 
@@ -294,7 +308,6 @@
                     let bottomTwo = [validCenters[2], validCenters[3]].sort((a, b) => a.x - b.x);
                     const pts = [topTwo[0], topTwo[1], bottomTwo[1], bottomTwo[0]];
 
-                    // 10秒キープの間だけ「緑色の四角枠」を描画
                     ctx.strokeStyle = '#34c759';
                     ctx.lineWidth = 5;
                     ctx.beginPath();
@@ -306,17 +319,17 @@
                     ctx.stroke();
 
                     if (lockCounter >= REQUIRED_FRAMES) {
-                        // 10秒が経過し、画角が完全に安定した瞬間
                         canvas.classList.add('locked');
                         isRecording = true;
 
-                        // 【完全自動録画スタート】
                         recordedChunks = [];
                         partCounter = 1; 
                         mediaRecorder.start();
 
-                        // 小分け保存タイマーを始動
                         startChunkSplitter();
+                        
+                        // 【追加】自動録画が始まったら、手動終了ボタンを表示する
+                        stopBtn.style.display = 'block';
                     } else {
                         let timeLeft = Math.ceil((REQUIRED_FRAMES - lockCounter) / 30);
                         statusText.innerHTML = `🟡 4点捕捉中... 画角安定まであと <span style="color: #ffcc00; font-size: 20px;">${timeLeft}</span> 秒`;
@@ -326,7 +339,6 @@
                     canvas.classList.remove('locked');
                     statusText.innerHTML = `🔍 マーカーを探しています... (${validCenters.length} / 4)`;
                     
-                    // 探している最中のみ、捕捉できている点に「赤丸」を表示
                     ctx.fillStyle = 'red';
                     for(let p of validCenters) {
                         ctx.beginPath();
@@ -335,11 +347,9 @@
                     }
                 }
             } else {
-                // 録画中（isRecording === true）の場合：
-                // 線やドットは一切上書き描画せず、純粋な生映像だけを記録します。
-                // 現在の録画パート数を上部のステータス欄でユーザーに通知します。
+                // 録画中：余計な線や文字は消したまま、上部ステータスで録画状況を明示
                 let intervalMin = Math.round(CHUNK_DURATION / 60000);
-                statusText.innerHTML = `<span style="color: #34c759;">🟢 録画自動化ループ作動中（動画パート: ${partCounter} 本目を撮影中... / ${intervalMin}分毎に自動保存）</span>`;
+                statusText.innerHTML = `<span style="color: #34c759;">🟢 自動録画中（動画パート: ${partCounter} 本目を撮影中... / ${intervalMin}分毎に自動保存）</span>`;
             }
 
             requestAnimationFrame(processVideo);
