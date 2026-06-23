@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QRコード4点検出（高解像度・遠距離対応）</title>
+    <title>ArUcoマーカー4点検出（研究・ロボット標準）</title>
     <style>
         body {
             margin: 0;
@@ -18,8 +18,8 @@
         }
         .container {
             position: relative;
-            width: 95%;
-            max-width: 720px;
+            width: 90%;
+            max-width: 640px;
         }
         video {
             display: none;
@@ -68,7 +68,6 @@
             margin-bottom: 10px;
             text-align: center;
             min-height: 24px;
-            padding: 0 10px;
         }
         #camera-trigger {
             display: none;
@@ -79,18 +78,18 @@
             100% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0); }
         }
     </style>
-    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+    <script async src="https://docs.opencv.org/4.x/opencv.js" id="opencv-src"></script>
 </head>
 <body>
 
-    <div id="status">システムを読み込んでいます...</div>
+    <div id="status">OpenCV.jsを読み込んでいます...</div>
     
     <div class="container">
         <video id="camera-view" autoplay playsinline muted></video>
         <canvas id="canvas-output"></canvas>
     </div>
 
-    <button id="start-btn" class="btn">システム開始</button>
+    <button id="start-btn" class="btn" disabled>システム開始</button>
     <button id="shoot-btn" class="btn">📸 撮影開始できます</button>
 
     <input type="file" id="camera-trigger" accept="image/*" capture="environment">
@@ -104,24 +103,26 @@
         const statusText = document.getElementById('status');
         const cameraTrigger = document.getElementById('camera-trigger');
 
+        let src, dst, dictionary, parameter, markerCorners, markerIds;
         let isProcessing = false;
         let lockCounter = 0;
-        const REQUIRED_FRAMES = 8; // フルHD化に伴い少しフレーム数を調整（約0.25秒）
+        const REQUIRED_FRAMES = 10; 
 
-        let qrPositions = { '左上': null, '右上': null, '左下': null, '右下': null };
+        // 四隅のマーカー座標（IDごとに固定）
+        // ID 0: 左上, ID 1: 右上, ID 2: 右下, ID 3: 左下
+        let markerPositions = { 0: null, 1: null, 2: null, 3: null };
 
-        statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
+        document.getElementById('opencv-src').addEventListener('load', () => {
+            statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
+            startBtn.disabled = false;
+        });
 
         startBtn.addEventListener('click', async () => {
-            statusText.innerText = "iPhoneの高解像度超広角カメラを探索中...";
+            statusText.innerText = "iPhoneの広角スキャン用カメラを探索中...";
             try {
-                // 1. カメラ権限の取得
-                const initStream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { facingMode: 'environment' } 
-                });
+                const initStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
                 initStream.getTracks().forEach(track => track.stop());
 
-                // 2. デバイス一覧の取得
                 const devices = await navigator.mediaDevices.enumerateDevices();
                 const videoDevices = devices.filter(device => device.kind === 'videoinput');
 
@@ -137,13 +138,10 @@
                     targetDeviceId = videoDevices[videoDevices.length - 1].deviceId;
                 }
 
-                // 3. 遠距離対策：1920x1080 (フルHD) を指定して小さなQRの潰れを防ぐ
+                // 軽量な解像度(1280x720)を設定
                 const constraints = {
                     audio: false,
-                    video: {
-                        width: { ideal: 1920 },
-                        height: { ideal: 1080 }
-                    }
+                    video: { width: { ideal: 1280 }, height: { ideal: 720 } }
                 };
 
                 if (targetDeviceId) {
@@ -154,26 +152,12 @@
 
                 const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 
-                // 4. カメラのハードウェア制御（ズーム最小化 ＆ フォーカス自動追従）
                 const videoTrack = stream.getVideoTracks()[0];
                 const capabilities = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
-                
-                let advancedConstraints = {};
                 if (capabilities.zoom) {
-                    advancedConstraints.zoom = capabilities.zoom.min;
-                }
-                // オートフォーカスを常時稼働させる命令
-                if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
-                    advancedConstraints.focusMode = 'continuous';
-                }
-
-                if (Object.keys(advancedConstraints).length > 0) {
                     try {
-                        await videoTrack.applyConstraints({ advanced: [advancedConstraints] });
-                        console.log("カメラ最適化設定を適用しました", advancedConstraints);
-                    } catch (e) {
-                        console.warn("カメラ詳細設定の適用に失敗: ", e);
-                    }
+                        await videoTrack.applyConstraints({ advanced: [{ zoom: capabilities.zoom.min }] });
+                    } catch (e) {}
                 }
 
                 video.srcObject = stream;
@@ -181,11 +165,21 @@
                 startBtn.style.display = 'none';
                 
                 video.onloadedmetadata = () => {
-                    // キャンバス解像度をビデオの生のフルHD解像度（1920x1080等）に完全一致させる
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
+                    
+                    // OpenCVのArUco初期化
+                    src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+                    dst = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+                    
+                    // 最も一般的でパターンの粗い「DICT_4X4_50」を使用（遠距離に最強）
+                    dictionary = cv.getPredefinedDictionary(cv.DICT_4X4_50);
+                    parameter = new cv.DetectorParameters();
+                    markerCorners = new cv.MatVector();
+                    markerIds = new cv.Mat();
+
                     isProcessing = true;
-                    statusText.innerText = "4つのQRコード（左上, 右上, 左下, 右下）を配置してください";
+                    statusText.innerText = "4つのArUcoマーカー（ID: 0, 1, 2, 3）を配置してください";
                     requestAnimationFrame(processVideo);
                 };
             } catch (error) {
@@ -212,67 +206,75 @@
         function processVideo() {
             if (!isProcessing) return;
 
-            // 等倍で描画
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            
-            // jsQRでスキャン
-            const code = jsQR(imageData.data, imageData.width, imageData.height, {
-                inversionAttempts: "dontInvert",
-            });
+            src.data.set(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
 
-            if (code) {
-                const txt = code.data.trim();
-                
-                if (['左上', '右上', '左下', '右下'].includes(txt)) {
-                    const loc = code.location;
-                    const centerX = (loc.topLeftCorner.x + loc.topRightCorner.x + loc.bottomRightCorner.x + loc.bottomLeftCorner.x) / 4;
-                    const centerY = (loc.topLeftCorner.y + loc.topRightCorner.y + loc.bottomRightCorner.y + loc.bottomLeftCorner.y) / 4;
+            // RGBAからRGBへ変換してArUco検出にかける
+            cv.cvtColor(src, dst, cv.COLOR_RGBA2RGB);
+            cv.detectMarkers(dst, dictionary, markerCorners, markerIds, parameter);
+
+            // 検出されたIDを解析
+            if (markerIds.rows > 0) {
+                for (let i = 0; i < markerIds.rows; ++i) {
+                    let id = markerIds.data32S[i];
                     
-                    qrPositions[txt] = { x: centerX, y: centerY, timestamp: Date.now() };
+                    // IDが0〜3の対象マーカーの場合
+                    if (id >= 0 && id <= 3) {
+                        // マーカーの4隅の座標から中心点を計算
+                        let cornerMat = markerCorners.get(i);
+                        let ptr = cornerMat.data32F; // [x0, y0, x1, y1, x2, y2, x3, y3]
+                        
+                        let centerX = (ptr[0] + ptr[2] + ptr[4] + ptr[6]) / 4;
+                        let centerY = (ptr[1] + ptr[3] + ptr[5] + ptr[7]) / 4;
+                        
+                        markerPositions[id] = { x: centerX, y: centerY, timestamp: Date.now() };
+                    }
                 }
             }
 
             let activeCount = 0;
             const now = Date.now();
-            
-            for (let key in qrPositions) {
-                let pos = qrPositions[key];
-                // 遠距離で一瞬見失ってもチラつかないよう、生存時間を2.5秒に延長
-                if (pos && (now - pos.timestamp < 2500)) {
+            const labels = { 0: "左上(ID:0)", 1: "右上(ID:1)", 2: "右下(ID:2)", 3: "左下(ID:3)" };
+
+            for (let id = 0; id <= 3; id++) {
+                let pos = markerPositions[id];
+                // 1.5秒以内の検出履歴があれば有効
+                if (pos && (now - pos.timestamp < 1500)) {
                     activeCount++;
                     
-                    // フルHD画面でも見えやすいようにピンと文字を大きく
+                    // 検出点表示
                     ctx.fillStyle = '#007aff';
                     ctx.beginPath();
-                    ctx.arc(pos.x, pos.y, 14, 0, 2 * Math.PI);
+                    ctx.arc(pos.x, pos.y, 8, 0, 2 * Math.PI);
                     ctx.fill();
                     
                     ctx.fillStyle = 'white';
-                    ctx.font = 'bold 32px sans-serif'; // 文字を大きく
-                    ctx.fillText(key, pos.x + 20, pos.y + 10);
+                    ctx.font = 'bold 16px sans-serif';
+                    ctx.fillText(labels[id], pos.x + 12, pos.y + 6);
                 } else {
-                    qrPositions[key] = null;
+                    markerPositions[id] = null;
                 }
             }
 
+            // 4点（ID 0,1,2,3）がすべて揃った場合
             if (activeCount === 4) {
                 lockCounter++;
 
+                // 外枠線を描画 (0 -> 1 -> 2 -> 3 -> 0)
                 ctx.strokeStyle = '#34c759';
-                ctx.lineWidth = 8; // 線を太く
+                ctx.lineWidth = 5;
                 ctx.beginPath();
-                ctx.moveTo(qrPositions['左上'].x, qrPositions['左上'].y);
-                ctx.lineTo(qrPositions['右上'].x, qrPositions['右上'].y);
-                ctx.lineTo(qrPositions['右下'].x, qrPositions['右下'].y);
-                ctx.lineTo(qrPositions['左下'].x, qrPositions['左下'].y);
+                ctx.moveTo(markerPositions[0].x, markerPositions[0].y);
+                ctx.lineTo(markerPositions[1].x, markerPositions[1].y);
+                ctx.lineTo(markerPositions[2].x, markerPositions[2].y);
+                ctx.lineTo(markerPositions[3].x, markerPositions[3].y);
                 ctx.closePath();
                 ctx.stroke();
 
                 if (lockCounter >= REQUIRED_FRAMES) {
                     canvas.classList.add('locked');
                     shootBtn.style.display = 'block';
-                    statusText.innerHTML = `<span style="color: #34c759;">🟢 すべてのQRコードをロックしました。撮影可能です</span>`;
+                    statusText.innerHTML = `<span style="color: #34c759;">🟢 すべてのマーカーをロックしました。撮影可能です</span>`;
                 } else {
                     statusText.innerHTML = `🟡 領域を固定中...`;
                 }
@@ -282,10 +284,10 @@
                 canvas.classList.remove('locked');
                 
                 let missing = [];
-                for(let key in qrPositions) {
-                    if(!qrPositions[key]) missing.push(key);
+                for (let id = 0; id <= 3; id++) {
+                    if (!markerPositions[id]) missing.push(labels[id]);
                 }
-                statusText.innerHTML = `🔍 QRコードを探しています... 不足: [ ${missing.join(', ')} ]`;
+                statusText.innerHTML = `🔍 マーカー探索中... 不足: [ ${missing.join(', ')} ]`;
             }
 
             requestAnimationFrame(processVideo);
