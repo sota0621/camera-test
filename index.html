@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出 ➔ ボタン押して撮影</title>
+    <title>黄緑色マーカー検出（円形度・閾値強化版）</title>
     <style>
         body {
             margin: 0;
@@ -145,7 +145,7 @@
                     targetDeviceId = videoDevices[videoDevices.length - 1].deviceId;
                 }
 
-                // 4. 軽量な解像度（640x480）でサクサク動作させます
+                // 4. 軽量な解像度（640x480）
                 const constraints = {
                     audio: false,
                     video: {
@@ -242,11 +242,22 @@
                 let cnt = contours.get(i);
                 let area = cv.contourArea(cnt);
 
-                // 【遠距離対策】面積の最低閾値を「5」にまで大幅引き下げ（遠くの極小の点も拾います）
-                if (area > 5) {
-                    let M = cv.moments(cnt);
-                    if (M.m00 !== 0) {
-                        validCenters.push({ x: M.m10 / M.m00, y: M.m01 / M.m00 });
+                // 1. 面積のしきい値を 20 に設定（極小のノイズを弾く）
+                if (area > 20) {
+                    // 2. 輪郭の「周囲の長さ」を計算
+                    let perimeter = cv.arcLength(cnt, true);
+                    
+                    if (perimeter > 0) {
+                        // 3. 円形度（Circularity）を計算
+                        let circularity = (4 * Math.PI * area) / (perimeter * perimeter);
+
+                        // 4. 円形度が0.65以上（概ね丸い形）のものだけを許可
+                        if (circularity > 0.65) { 
+                            let M = cv.moments(cnt);
+                            if (M.m00 !== 0) {
+                                validCenters.push({ x: M.m10 / M.m00, y: M.m01 / M.m00 });
+                            }
+                        }
                     }
                 }
                 cnt.delete();
@@ -286,7 +297,7 @@
                 canvas.classList.remove('locked');
                 statusText.innerHTML = `🔍 マーカーを探しています... (${validCenters.length} / 4)`;
                 
-                // 現在捕捉できている点を赤い点でデバッグ表示
+                // 現在捕捉できている合格点を赤い点で表示
                 ctx.fillStyle = 'red';
                 for(let p of validCenters) {
                     ctx.beginPath();
