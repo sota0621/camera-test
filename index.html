@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出（長時間録画対応版）</title>
+    <title>黄緑色マーカー検出（長時間録画・確実起動版）</title>
     <style>
         body {
             margin: 0;
@@ -44,16 +44,17 @@
             margin: 20px;
         }
         .btn {
-            padding: 15px 30px;
-            font-size: 18px;
+            padding: 18px 30px;
+            font-size: 20px;
             color: white;
             border: none;
-            border-radius: 8px;
+            border-radius: 12px;
             cursor: pointer;
             font-weight: bold;
             transition: all 0.3s;
-            width: 260px;
+            width: 280px;
             text-align: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
         }
         #start-btn {
             background-color: #007aff;
@@ -61,6 +62,16 @@
         #start-btn:disabled {
             background-color: #555;
             cursor: not-allowed;
+            box-shadow: none;
+        }
+        /* 10秒安定した時に出現するボタン */
+        #launch-camera-btn {
+            background-color: #ff3b30; /* 目立つ赤色 */
+            display: none;
+            animation: pulse 1.5s infinite;
+        }
+        #launch-camera-btn:active {
+            transform: scale(0.95);
         }
         #status {
             font-size: 16px;
@@ -70,9 +81,13 @@
             min-height: 24px;
             padding: 0 10px;
         }
-        /* バックグラウンドで標準カメラを呼び出すためのインプット（非表示） */
         #camera-trigger {
             display: none;
+        }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(255, 59, 48, 0.7); }
+            70% { box-shadow: 0 0 0 15px rgba(255, 59, 48, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(255, 59, 48, 0); }
         }
     </style>
     <script async src="https://docs.opencv.org/4.x/opencv.js" id="opencv-src"></script>
@@ -88,6 +103,7 @@
 
     <div class="btn-container">
         <button id="start-btn" class="btn" disabled>システム開始</button>
+        <button id="launch-camera-btn" class="btn">🔴 録画を開始する</button>
     </div>
 
     <input type="file" id="camera-trigger" accept="video/*" capture="environment">
@@ -97,15 +113,16 @@
         const canvas = document.getElementById('canvas-output');
         const ctx = canvas.getContext('2d');
         const startBtn = document.getElementById('start-btn');
+        const launchCameraBtn = document.getElementById('launch-camera-btn');
         const statusText = document.getElementById('status');
         const cameraTrigger = document.getElementById('camera-trigger');
 
         let src, dst, hsv, mask, contours, hierarchy;
         let isProcessing = false;
-        let isRedirecting = false; // カメラアプリ移行中の二重動作防止
+        let isStable = false; // 10秒判定がクリアされたかどうかのフラグ
         
         let lockCounter = 0;
-        const REQUIRED_FRAMES = 300; // 10秒間安定
+        const REQUIRED_FRAMES = 300; // 10秒間安定（30fps×10）
 
         document.getElementById('opencv-src').addEventListener('load', () => {
             statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
@@ -187,21 +204,27 @@
             }
         });
 
-        // カメラアプリでの長時間のビデオ撮影が完了し、ブラウザに戻ってきた時
+        // 🔴 ユーザーが手動でボタンをタップした時（これならブラウザに絶対にブロックされません）
+        launchCameraBtn.addEventListener('click', () => {
+            cameraTrigger.click();
+        });
+
+        // 長時間撮影が終了して戻ってきたとき
         cameraTrigger.addEventListener('change', (e) => {
             if (e.target.files.length > 0) {
-                statusText.innerHTML = `<span style="color: #34c759;">🎉 長時間動画の記録・保存に成功しました！</span>`;
+                statusText.innerHTML = `<span style="color: #34c759;">🎉 動画がカメラロールに直接保存されました！</span>`;
             }
-            // 各種フラグ・カウントのリセット
+            // リセットして次の計測へ
             lockCounter = 0;
-            isRedirecting = false;
+            isStable = false;
+            launchCameraBtn.style.display = 'none';
             canvas.classList.remove('locked');
             isProcessing = true;
             requestAnimationFrame(processVideo);
         });
 
         function processVideo() {
-            if (!isProcessing || isRedirecting) return;
+            if (!isProcessing) return;
 
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
             src.data.set(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
@@ -239,13 +262,17 @@
             }
 
             if (validCenters.length === 4) {
-                lockCounter++;
+                // 10秒判定がまだクリアされていない場合のみカウントを進める
+                if (!isStable) {
+                    lockCounter++;
+                }
 
                 validCenters.sort((a, b) => a.y - b.y);
                 let topTwo = [validCenters[0], validCenters[1]].sort((a, b) => a.x - b.x);
                 let bottomTwo = [validCenters[2], validCenters[3]].sort((a, b) => a.x - b.x);
                 const pts = [topTwo[0], topTwo[1], bottomTwo[1], bottomTwo[0]];
 
+                // 緑の四角枠を描画
                 ctx.strokeStyle = '#34c759';
                 ctx.lineWidth = 5;
                 ctx.beginPath();
@@ -257,25 +284,23 @@
                 ctx.stroke();
 
                 if (lockCounter >= REQUIRED_FRAMES) {
+                    isStable = true;
                     canvas.classList.add('locked');
-                    isRedirecting = true;
-                    isProcessing = false;
-
-                    statusText.innerHTML = `<span style="color: #34c759;">🟢 画角安定を確認。ビデオ録画を開始します...</span>`;
-                    
-                    // 【解決策】ブラウザの録画を廃止し、OS標準の超軽量カメラアプリ（ビデオモード）を自動起動
-                    setTimeout(() => {
-                        cameraTrigger.click();
-                    }, 500);
+                    launchCameraBtn.style.display = 'block'; // 赤い録画ボタンを出現させる
+                    statusText.innerHTML = `<span style="color: #34c759; font-size: 18px;">🟢 画角が完全に安定しました！ボタンを押して録画を開始してください</span>`;
                 } else {
                     let timeLeft = Math.ceil((REQUIRED_FRAMES - lockCounter) / 30);
                     statusText.innerHTML = `🟡 4点捕捉中... 画角安定まであと <span style="color: #ffcc00; font-size: 20px;">${timeLeft}</span> 秒`;
                 }
             } else {
-                lockCounter = 0;
-                canvas.classList.remove('locked');
-                statusText.innerHTML = `🔍 マーカーを探しています... (${validCenters.length} / 4)`;
+                // 10秒経過する前に見失ったらカウントリセット
+                if (!isStable) {
+                    lockCounter = 0;
+                    canvas.classList.remove('locked');
+                    statusText.innerHTML = `🔍 マーカーを探しています... (${validCenters.length} / 4)`;
+                }
                 
+                // 認識できている点のデバッグ用赤丸
                 ctx.fillStyle = 'red';
                 for(let p of validCenters) {
                     ctx.beginPath();
@@ -284,9 +309,7 @@
                 }
             }
 
-            if (!isRedirecting) {
-                requestAnimationFrame(processVideo);
-            }
+            requestAnimationFrame(processVideo);
         }
     </script>
 </body>
