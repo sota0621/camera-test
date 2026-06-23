@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出（円形度・閾値強化版）</title>
+    <title>黄緑色マーカー検出（0.5倍固定・録画対応）</title>
     <style>
         body {
             margin: 0;
@@ -32,13 +32,18 @@
             display: block;
             transition: border-color 0.3s;
         }
-        /* 4点ロック時のキャンバス枠線 */
         canvas.locked {
             border-color: #34c759;
             box-shadow: 0 0 15px rgba(52, 199, 89, 0.5);
         }
-        .btn {
+        .btn-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
             margin: 20px;
+        }
+        .btn {
             padding: 15px 30px;
             font-size: 18px;
             color: white;
@@ -47,6 +52,8 @@
             cursor: pointer;
             font-weight: bold;
             transition: all 0.3s;
+            width: 260px;
+            text-align: center;
         }
         #start-btn {
             background-color: #007aff;
@@ -55,14 +62,17 @@
             background-color: #555;
             cursor: not-allowed;
         }
-        /* 撮影開始ボタン */
         #shoot-btn {
             background-color: #34c759;
             display: none;
             animation: pulse 1.5s infinite;
         }
-        #shoot-btn:active {
-            transform: scale(0.95);
+        #record-btn {
+            background-color: #ff3b30; /* 赤色ボタン */
+            display: none; /* カメラ起動後に出現 */
+        }
+        #record-btn.recording {
+            background-color: #8e8e93; /* 録画中はグレーに変更 */
         }
         #status {
             font-size: 16px;
@@ -91,8 +101,11 @@
         <canvas id="canvas-output"></canvas>
     </div>
 
-    <button id="start-btn" class="btn" disabled>システム開始</button>
-    <button id="shoot-btn" class="btn">📸 撮影開始できます</button>
+    <div class="btn-container">
+        <button id="start-btn" class="btn" disabled>システム開始</button>
+        <button id="record-btn" class="btn">🔴 録画開始</button>
+        <button id="shoot-btn" class="btn">📸 撮影開始できます</button>
+    </div>
 
     <input type="file" id="camera-trigger" accept="image/*" capture="environment">
 
@@ -102,6 +115,7 @@
         const ctx = canvas.getContext('2d');
         const startBtn = document.getElementById('start-btn');
         const shootBtn = document.getElementById('shoot-btn');
+        const recordBtn = document.getElementById('record-btn');
         const statusText = document.getElementById('status');
         const cameraTrigger = document.getElementById('camera-trigger');
 
@@ -109,9 +123,13 @@
         let isProcessing = false;
         
         let lockCounter = 0;
-        const REQUIRED_FRAMES = 15; // 約0.5秒間安定したらボタンを表示
+        const REQUIRED_FRAMES = 15;
 
-        // OpenCV.js の読み込み完了を待つ
+        // 録画用の変数
+        let mediaRecorder;
+        let recordedChunks = [];
+        let isRecording = false;
+
         document.getElementById('opencv-src').addEventListener('load', () => {
             statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
             startBtn.disabled = false;
@@ -120,19 +138,13 @@
         startBtn.addEventListener('click', async () => {
             statusText.innerText = "広角スキャン用カメラを探索中...";
             try {
-                // 1. まず通常の背面カメラで権限を取得
-                const initStream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { facingMode: 'environment' } 
-                });
+                const initStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
                 initStream.getTracks().forEach(track => track.stop());
 
-                // 2. 利用可能な全カメラデバイスを取得
                 const devices = await navigator.mediaDevices.enumerateDevices();
                 const videoDevices = devices.filter(device => device.kind === 'videoinput');
 
                 let targetDeviceId = null;
-
-                // 3. 広角（0.5x）カメラの絞り込み
                 const wideDevice = videoDevices.find(d => {
                     const label = d.label.toLowerCase();
                     return label.includes('ultra') || label.includes('wide') || label.includes('0.5') || label.includes('超広角');
@@ -140,12 +152,10 @@
 
                 if (wideDevice) {
                     targetDeviceId = wideDevice.deviceId;
-                    console.log("広角レンズを検出しました: " + wideDevice.label);
                 } else if (videoDevices.length > 1) {
                     targetDeviceId = videoDevices[videoDevices.length - 1].deviceId;
                 }
 
-                // 4. 軽量な解像度（640x480）
                 const constraints = {
                     audio: false,
                     video: {
@@ -162,7 +172,7 @@
 
                 const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 
-                // 5. ズーム倍率を最小（広角側）に強制設定
+                // 【0.5倍固定】ストリーム開始直後に、ズームを最小値（超広角側）に即座に適用
                 const videoTrack = stream.getVideoTracks()[0];
                 const capabilities = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
                 
@@ -171,14 +181,16 @@
                         await videoTrack.applyConstraints({
                             advanced: [{ zoom: capabilities.zoom.min }]
                         });
+                        console.log("初期倍率を0.5倍（最小ズーム）に設定しました。");
                     } catch (e) {
-                        console.warn("ズーム倍率の設定に失敗しました: ", e);
+                        console.warn("初期ズーム倍率の設定に失敗: ", e);
                     }
                 }
 
                 video.srcObject = stream;
                 video.play();
                 startBtn.style.display = 'none';
+                recordBtn.style.display = 'block'; // 録画ボタンを表示できるようにする
                 
                 video.onloadedmetadata = () => {
                     canvas.width = video.videoWidth;
@@ -191,6 +203,43 @@
                     contours = new cv.MatVector();
                     hierarchy = new cv.Mat();
 
+                    // 【録画初期化】Canvasの描画ストリーム（30fps）をキャプチャしてレコーダーを準備
+                    const canvasStream = canvas.captureStream(30);
+                    
+                    // iPhone(iOS)のSafariで確実に動作するビデオコーデックを指定
+                    let options = { mimeType: 'video/mp4; codecs=avc1' };
+                    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                        options = { mimeType: 'video/webm; codecs=vp9' };
+                    }
+                    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                        options = { mimeType: '' }; // ブラウザデフォルト
+                    }
+
+                    mediaRecorder = new MediaRecorder(canvasStream, options);
+                    
+                    mediaRecorder.ondataavailable = (event) => {
+                        if (event.data && event.data.size > 0) {
+                            recordedChunks.push(event.data);
+                        }
+                    };
+
+                    mediaRecorder.onstop = () => {
+                        // 録画停止時に動画ファイルを生成して自動保存（ダウンロード）
+                        const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'video/mp4' });
+                        recordedChunks = [];
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        // ファイル名に現在時刻を付与
+                        const nowTime = new Date().toISOString().replace(/[:.]/g, '-');
+                        a.download = `experiment-record-${nowTime}.mp4`;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                        statusText.innerHTML = `<span style="color: #34c759;">🎬 動画ファイルを自動保存しました</span>`;
+                    };
+
                     isProcessing = true;
                     statusText.innerText = "黄緑の丸4つを画面内に収めてください";
                     requestAnimationFrame(processVideo);
@@ -200,13 +249,36 @@
             }
         });
 
-        // 撮影ボタンを押した時
+        // 🟥 録画ボタンのクリックイベント
+        recordBtn.addEventListener('click', () => {
+            if (!isRecording) {
+                // 録画開始
+                recordedChunks = [];
+                mediaRecorder.start();
+                isRecording = true;
+                recordBtn.innerText = "⏹ 録画停止";
+                recordBtn.classList.add('recording');
+            } else {
+                // 録画停止
+                mediaRecorder.stop();
+                isRecording = false;
+                recordBtn.innerText = "🔴 録画開始";
+                recordBtn.classList.remove('recording');
+            }
+        });
+
         shootBtn.addEventListener('click', () => {
             isProcessing = false; 
+            // 録画中の場合は一旦止める
+            if (isRecording) {
+                mediaRecorder.stop();
+                isRecording = false;
+                recordBtn.innerText = "🔴 録画開始";
+                recordBtn.classList.remove('recording');
+            }
             cameraTrigger.click(); 
         });
 
-        // ネイティブカメラでの撮影が完了してブラウザに戻ってきた時
         cameraTrigger.addEventListener('change', (e) => {
             if (e.target.files.length > 0) {
                 statusText.innerHTML = `<span style="color: #34c759;">🎉 写真の取り込みに成功しました！</span>`;
@@ -228,7 +300,6 @@
             cv.cvtColor(dst, hsv, cv.COLOR_RGBA2RGB);
             cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
 
-            // 黄緑色の抽出範囲
             let low = cv.matFromArray(3, 1, cv.CV_8U, [35, 60, 50]);
             let high = cv.matFromArray(3, 1, cv.CV_8U, [85, 255, 255]);
             cv.inRange(hsv, low, high, mask);
@@ -242,16 +313,10 @@
                 let cnt = contours.get(i);
                 let area = cv.contourArea(cnt);
 
-                // 1. 面積のしきい値を 20 に設定（極小のノイズを弾く）
                 if (area > 20) {
-                    // 2. 輪郭の「周囲の長さ」を計算
                     let perimeter = cv.arcLength(cnt, true);
-                    
                     if (perimeter > 0) {
-                        // 3. 円形度（Circularity）を計算
                         let circularity = (4 * Math.PI * area) / (perimeter * perimeter);
-
-                        // 4. 円形度が0.65以上（概ね丸い形）のものだけを許可
                         if (circularity > 0.65) { 
                             let M = cv.moments(cnt);
                             if (M.m00 !== 0) {
@@ -263,17 +328,14 @@
                 cnt.delete();
             }
 
-            // 4つのマーカーが見つかっているか
             if (validCenters.length === 4) {
                 lockCounter++;
 
-                // 座標の自動並び替え
                 validCenters.sort((a, b) => a.y - b.y);
                 let topTwo = [validCenters[0], validCenters[1]].sort((a, b) => a.x - b.x);
                 let bottomTwo = [validCenters[2], validCenters[3]].sort((a, b) => a.x - b.x);
                 const pts = [topTwo[0], topTwo[1], bottomTwo[1], bottomTwo[0]];
 
-                // 緑の枠線を描画
                 ctx.strokeStyle = '#34c759';
                 ctx.lineWidth = 5;
                 ctx.beginPath();
@@ -287,23 +349,38 @@
                 if (lockCounter >= REQUIRED_FRAMES) {
                     canvas.classList.add('locked');
                     shootBtn.style.display = 'block';
-                    statusText.innerHTML = `<span style="color: #34c759;">🟢 領域をロックしました。撮影ボタンを押してください</span>`;
+                    if (!isRecording) {
+                        statusText.innerHTML = `<span style="color: #34c759;">🟢 領域をロックしました。撮影または録画可能です</span>`;
+                    }
                 } else {
-                    statusText.innerHTML = `🟡 領域を確認中...`;
+                    if (!isRecording) statusText.innerHTML = `🟡 領域を確認中...`;
                 }
             } else {
                 lockCounter = 0;
                 shootBtn.style.display = 'none';
                 canvas.classList.remove('locked');
-                statusText.innerHTML = `🔍 マーカーを探しています... (${validCenters.length} / 4)`;
+                if (!isRecording) {
+                    statusText.innerHTML = `🔍 マーカーを探しています... (${validCenters.length} / 4)`;
+                }
                 
-                // 現在捕捉できている合格点を赤い点で表示
                 ctx.fillStyle = 'red';
                 for(let p of validCenters) {
                     ctx.beginPath();
                     ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI);
                     ctx.fill();
                 }
+            }
+
+            // 録画中の場合は画面左上に小さく「● REC」と録画中インジケータを上書き描画
+            if (isRecording) {
+                ctx.fillStyle = '#ff3b30';
+                ctx.beginPath();
+                ctx.arc(25, 25, 7, 0, 2 * Math.PI);
+                ctx.fill();
+                ctx.fillStyle = 'white';
+                ctx.font = 'bold 16px sans-serif';
+                ctx.fillText('REC', 40, 31);
+                statusText.innerHTML = `<span style="color: #ff3b30;">🔴 実験映像を録画中です...</span>`;
             }
 
             requestAnimationFrame(processVideo);
