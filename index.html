@@ -260,7 +260,7 @@
                 let cnt = contours.get(i);
                 let area = cv.contourArea(cnt);
 
-                if (area > 10) {
+                if (area > 1) {
                     let perimeter = cv.arcLength(cnt, true);
                     if (perimeter > 0) {
                         let circularity = (4 * Math.PI * area) / (perimeter * perimeter);
