@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ArUcoマーカー4点検出（研究・ロボット標準）</title>
+    <title>ArUcoマーカー4点検出（起動修正版）</title>
     <style>
         body {
             margin: 0;
@@ -68,6 +68,7 @@
             margin-bottom: 10px;
             text-align: center;
             min-height: 24px;
+            padding: 0 15px;
         }
         #camera-trigger {
             display: none;
@@ -78,7 +79,6 @@
             100% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0); }
         }
     </style>
-    <script async src="https://docs.opencv.org/4.x/opencv.js" id="opencv-src"></script>
 </head>
 <body>
 
@@ -95,6 +95,21 @@
     <input type="file" id="camera-trigger" accept="image/*" capture="environment">
 
     <script>
+        var openCvReady = false;
+        function onOpenCvReady() {
+            console.log('OpenCV.js Ready');
+            openCvReady = true;
+            const statusText = document.getElementById('status');
+            const startBtn = document.getElementById('start-btn');
+            if (statusText && startBtn) {
+                statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
+                startBtn.disabled = false;
+            }
+        }
+    </script>
+    <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady()"></script>
+
+    <script>
         const video = document.getElementById('camera-view');
         const canvas = document.getElementById('canvas-output');
         const ctx = canvas.getContext('2d');
@@ -108,40 +123,51 @@
         let lockCounter = 0;
         const REQUIRED_FRAMES = 10; 
 
-        // 四隅のマーカー座標（IDごとに固定）
-        // ID 0: 左上, ID 1: 右上, ID 2: 右下, ID 3: 左下
         let markerPositions = { 0: null, 1: null, 2: null, 3: null };
 
-        document.getElementById('opencv-src').addEventListener('load', () => {
-            statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
-            startBtn.disabled = false;
-        });
+        // ページ読み込み時にスクリプトが先走った場合の保険
+        if (typeof cv !== 'undefined' && cv.Mat) {
+            onOpenCvReady();
+        }
 
         startBtn.addEventListener('click', async () => {
-            statusText.innerText = "iPhoneの広角スキャン用カメラを探索中...";
+            if (!openCvReady) {
+                statusText.innerText = "エラー: OpenCV.jsがまだ完全に読み込まれていません。";
+                return;
+            }
+
+            statusText.innerText = "iPhoneのカメラにアクセス中...";
             try {
+                // 1. まず標準的な背面カメラで権限をリクエスト
                 const initStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
                 initStream.getTracks().forEach(track => track.stop());
 
+                // 2. 利用可能な全カメラデバイスを取得して、広角・超広角レンズを探索
                 const devices = await navigator.mediaDevices.enumerateDevices();
                 const videoDevices = devices.filter(device => device.kind === 'videoinput');
 
                 let targetDeviceId = null;
+                // 背面カメラ(environment)の中から、超広角らしきラベルを優先取得
                 const wideDevice = videoDevices.find(d => {
                     const label = d.label.toLowerCase();
-                    return label.includes('ultra') || label.includes('wide') || label.includes('0.5') || label.includes('超広角');
+                    return label.includes('ultra') || label.includes('wide') || label.includes('0.5') || label.includes('超広角') || label.includes('背面カメラ 3') || label.includes('背面カメラ 2');
                 });
 
                 if (wideDevice) {
                     targetDeviceId = wideDevice.deviceId;
+                    console.log("選択されたカメラ:", wideDevice.label);
                 } else if (videoDevices.length > 1) {
+                    // 見つからない場合、iPhoneの複数レンズ(トリプル/デュアル)の末尾が超広角であることが多いため末尾を選択
                     targetDeviceId = videoDevices[videoDevices.length - 1].deviceId;
                 }
 
-                // 軽量な解像度(1280x720)を設定
+                // 軽量な1280x720解像度を設定
                 const constraints = {
                     audio: false,
-                    video: { width: { ideal: 1280 }, height: { ideal: 720 } }
+                    video: { 
+                        width: { ideal: 1280 }, 
+                        height: { ideal: 720 } 
+                    }
                 };
 
                 if (targetDeviceId) {
@@ -152,12 +178,15 @@
 
                 const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 
+                // 3. ズーム倍率を最小（0.5倍側）に固定する命令
                 const videoTrack = stream.getVideoTracks()[0];
                 const capabilities = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
                 if (capabilities.zoom) {
                     try {
                         await videoTrack.applyConstraints({ advanced: [{ zoom: capabilities.zoom.min }] });
-                    } catch (e) {}
+                    } catch (e) {
+                        console.warn("ズーム設定に失敗しました:", e);
+                    }
                 }
 
                 video.srcObject = stream;
@@ -168,22 +197,28 @@
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
                     
-                    // OpenCVのArUco初期化
-                    src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-                    dst = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-                    
-                    // 最も一般的でパターンの粗い「DICT_4X4_50」を使用（遠距離に最強）
-                    dictionary = cv.getPredefinedDictionary(cv.DICT_4X4_50);
-                    parameter = new cv.DetectorParameters();
-                    markerCorners = new cv.MatVector();
-                    markerIds = new cv.Mat();
+                    try {
+                        // OpenCVのArUcoモジュールの初期化
+                        src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+                        dst = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
+                        
+                        // マーカーの模様が最も粗く、遠距離・歪みに強い「DICT_4X4_50」をセット
+                        dictionary = cv.getPredefinedDictionary(cv.DICT_4X4_50);
+                        parameter = new cv.DetectorParameters();
+                        markerCorners = new cv.MatVector();
+                        markerIds = new cv.Mat();
 
-                    isProcessing = true;
-                    statusText.innerText = "4つのArUcoマーカー（ID: 0, 1, 2, 3）を配置してください";
-                    requestAnimationFrame(processVideo);
+                        isProcessing = true;
+                        statusText.innerText = "4つのArUcoマーカー（ID: 0, 1, 2, 3）を配置してください";
+                        requestAnimationFrame(processVideo);
+                    } catch (opencvError) {
+                        statusText.innerHTML = `<span style="color: red;">OpenCV初期化エラー: ${opencvError.message}<br>※ArUcoモジュールが未対応の可能性があります。</span>`;
+                        console.error(opencvError);
+                    }
                 };
             } catch (error) {
-                statusText.innerText = "カメラ起動失敗: " + error.message;
+                statusText.innerHTML = `<span style="color: red;">カメラ探索・起動エラー: ${error.message}</span>`;
+                console.error(error);
             }
         });
 
@@ -206,88 +241,90 @@
         function processVideo() {
             if (!isProcessing) return;
 
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            src.data.set(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
+            try {
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                src.data.set(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
 
-            // RGBAからRGBへ変換してArUco検出にかける
-            cv.cvtColor(src, dst, cv.COLOR_RGBA2RGB);
-            cv.detectMarkers(dst, dictionary, markerCorners, markerIds, parameter);
+                // ArUco検出のためにカラー空間を変換
+                cv.cvtColor(src, dst, cv.COLOR_RGBA2RGB);
+                cv.detectMarkers(dst, dictionary, markerCorners, markerIds, parameter);
 
-            // 検出されたIDを解析
-            if (markerIds.rows > 0) {
-                for (let i = 0; i < markerIds.rows; ++i) {
-                    let id = markerIds.data32S[i];
-                    
-                    // IDが0〜3の対象マーカーの場合
-                    if (id >= 0 && id <= 3) {
-                        // マーカーの4隅の座標から中心点を計算
-                        let cornerMat = markerCorners.get(i);
-                        let ptr = cornerMat.data32F; // [x0, y0, x1, y1, x2, y2, x3, y3]
+                // 検出されたマーカーの解析
+                if (markerIds.rows > 0) {
+                    for (let i = 0; i < markerIds.rows; ++i) {
+                        let id = markerIds.data32S[i];
                         
-                        let centerX = (ptr[0] + ptr[2] + ptr[4] + ptr[6]) / 4;
-                        let centerY = (ptr[1] + ptr[3] + ptr[5] + ptr[7]) / 4;
-                        
-                        markerPositions[id] = { x: centerX, y: centerY, timestamp: Date.now() };
+                        if (id >= 0 && id <= 3) {
+                            let cornerMat = markerCorners.get(i);
+                            let ptr = cornerMat.data32F; // [x0, y0, x1, y1, x2, y2, x3, y3]
+                            
+                            // 4隅の平均から中心座標を算出
+                            let centerX = (ptr[0] + ptr[2] + ptr[4] + ptr[6]) / 4;
+                            let centerY = (ptr[1] + ptr[3] + ptr[5] + ptr[7]) / 4;
+                            
+                            markerPositions[id] = { x: centerX, y: centerY, timestamp: Date.now() };
+                        }
                     }
                 }
-            }
 
-            let activeCount = 0;
-            const now = Date.now();
-            const labels = { 0: "左上(ID:0)", 1: "右上(ID:1)", 2: "右下(ID:2)", 3: "左下(ID:3)" };
+                let activeCount = 0;
+                const now = Date.now();
+                const labels = { 0: "左上(ID:0)", 1: "右上(ID:1)", 2: "右下(ID:2)", 3: "左下(ID:3)" };
 
-            for (let id = 0; id <= 3; id++) {
-                let pos = markerPositions[id];
-                // 1.5秒以内の検出履歴があれば有効
-                if (pos && (now - pos.timestamp < 1500)) {
-                    activeCount++;
-                    
-                    // 検出点表示
-                    ctx.fillStyle = '#007aff';
-                    ctx.beginPath();
-                    ctx.arc(pos.x, pos.y, 8, 0, 2 * Math.PI);
-                    ctx.fill();
-                    
-                    ctx.fillStyle = 'white';
-                    ctx.font = 'bold 16px sans-serif';
-                    ctx.fillText(labels[id], pos.x + 12, pos.y + 6);
-                } else {
-                    markerPositions[id] = null;
-                }
-            }
-
-            // 4点（ID 0,1,2,3）がすべて揃った場合
-            if (activeCount === 4) {
-                lockCounter++;
-
-                // 外枠線を描画 (0 -> 1 -> 2 -> 3 -> 0)
-                ctx.strokeStyle = '#34c759';
-                ctx.lineWidth = 5;
-                ctx.beginPath();
-                ctx.moveTo(markerPositions[0].x, markerPositions[0].y);
-                ctx.lineTo(markerPositions[1].x, markerPositions[1].y);
-                ctx.lineTo(markerPositions[2].x, markerPositions[2].y);
-                ctx.lineTo(markerPositions[3].x, markerPositions[3].y);
-                ctx.closePath();
-                ctx.stroke();
-
-                if (lockCounter >= REQUIRED_FRAMES) {
-                    canvas.classList.add('locked');
-                    shootBtn.style.display = 'block';
-                    statusText.innerHTML = `<span style="color: #34c759;">🟢 すべてのマーカーをロックしました。撮影可能です</span>`;
-                } else {
-                    statusText.innerHTML = `🟡 領域を固定中...`;
-                }
-            } else {
-                lockCounter = 0;
-                shootBtn.style.display = 'none';
-                canvas.classList.remove('locked');
-                
-                let missing = [];
                 for (let id = 0; id <= 3; id++) {
-                    if (!markerPositions[id]) missing.push(labels[id]);
+                    let pos = markerPositions[id];
+                    if (pos && (now - pos.timestamp < 1500)) {
+                        activeCount++;
+                        
+                        // 検出位置に青い丸を描画
+                        ctx.fillStyle = '#007aff';
+                        ctx.beginPath();
+                        ctx.arc(pos.x, pos.y, 8, 0, 2 * Math.PI);
+                        ctx.fill();
+                        
+                        ctx.fillStyle = 'white';
+                        ctx.font = 'bold 16px sans-serif';
+                        ctx.fillText(labels[id], pos.x + 12, pos.y + 6);
+                    } else {
+                        markerPositions[id] = null;
+                    }
                 }
-                statusText.innerHTML = `🔍 マーカー探索中... 不足: [ ${missing.join(', ')} ]`;
+
+                if (activeCount === 4) {
+                    lockCounter++;
+
+                    // 緑色の外枠線を描画 (0 -> 1 -> 2 -> 3 -> 0)
+                    ctx.strokeStyle = '#34c759';
+                    ctx.lineWidth = 5;
+                    ctx.beginPath();
+                    ctx.moveTo(markerPositions[0].x, markerPositions[0].y);
+                    ctx.lineTo(markerPositions[1].x, markerPositions[1].y);
+                    ctx.lineTo(markerPositions[2].x, markerPositions[2].y);
+                    ctx.lineTo(markerPositions[3].x, markerPositions[3].y);
+                    ctx.closePath();
+                    ctx.stroke();
+
+                    if (lockCounter >= REQUIRED_FRAMES) {
+                        canvas.classList.add('locked');
+                        shootBtn.style.display = 'block';
+                        statusText.innerHTML = `<span style="color: #34c759;">🟢 すべてのマーカーをロックしました。撮影可能です</span>`;
+                    } else {
+                        statusText.innerHTML = `🟡 領域を固定中...`;
+                    }
+                } else {
+                    lockCounter = 0;
+                    shootBtn.style.display = 'none';
+                    canvas.classList.remove('locked');
+                    
+                    let missing = [];
+                    for (let id = 0; id <= 3; id++) {
+                        if (!markerPositions[id]) missing.push(labels[id]);
+                    }
+                    statusText.innerHTML = `🔍 マーカー探索中... 不足: [ ${missing.join(', ')} ]`;
+                }
+
+            } catch (loopError) {
+                console.error("ループ処理エラー:", loopError);
             }
 
             requestAnimationFrame(processVideo);
