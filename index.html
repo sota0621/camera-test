@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QRコード4点検出（日本語対応）</title>
+    <title>QRコード4点検出（高解像度・遠距離対応）</title>
     <style>
         body {
             margin: 0;
@@ -18,8 +18,8 @@
         }
         .container {
             position: relative;
-            width: 90%;
-            max-width: 640px;
+            width: 95%;
+            max-width: 720px;
         }
         video {
             display: none;
@@ -68,6 +68,7 @@
             margin-bottom: 10px;
             text-align: center;
             min-height: 24px;
+            padding: 0 10px;
         }
         #camera-trigger {
             display: none;
@@ -105,21 +106,22 @@
 
         let isProcessing = false;
         let lockCounter = 0;
-        const REQUIRED_FRAMES = 10; // 約0.3秒間安定したらロック
+        const REQUIRED_FRAMES = 8; // フルHD化に伴い少しフレーム数を調整（約0.25秒）
 
-        // 日本語のキーに変更
         let qrPositions = { '左上': null, '右上': null, '左下': null, '右下': null };
 
         statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
 
         startBtn.addEventListener('click', async () => {
-            statusText.innerText = "iPhoneの広角スキャン用カメラを探索中...";
+            statusText.innerText = "iPhoneの高解像度超広角カメラを探索中...";
             try {
+                // 1. カメラ権限の取得
                 const initStream = await navigator.mediaDevices.getUserMedia({ 
                     video: { facingMode: 'environment' } 
                 });
                 initStream.getTracks().forEach(track => track.stop());
 
+                // 2. デバイス一覧の取得
                 const devices = await navigator.mediaDevices.enumerateDevices();
                 const videoDevices = devices.filter(device => device.kind === 'videoinput');
 
@@ -135,11 +137,12 @@
                     targetDeviceId = videoDevices[videoDevices.length - 1].deviceId;
                 }
 
+                // 3. 遠距離対策：1920x1080 (フルHD) を指定して小さなQRの潰れを防ぐ
                 const constraints = {
                     audio: false,
                     video: {
-                        width: { ideal: 1280 },
-                        height: { ideal: 720 }
+                        width: { ideal: 1920 },
+                        height: { ideal: 1080 }
                     }
                 };
 
@@ -151,16 +154,25 @@
 
                 const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 
+                // 4. カメラのハードウェア制御（ズーム最小化 ＆ フォーカス自動追従）
                 const videoTrack = stream.getVideoTracks()[0];
                 const capabilities = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
                 
+                let advancedConstraints = {};
                 if (capabilities.zoom) {
+                    advancedConstraints.zoom = capabilities.zoom.min;
+                }
+                // オートフォーカスを常時稼働させる命令
+                if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
+                    advancedConstraints.focusMode = 'continuous';
+                }
+
+                if (Object.keys(advancedConstraints).length > 0) {
                     try {
-                        await videoTrack.applyConstraints({
-                            advanced: [{ zoom: capabilities.zoom.min }]
-                        });
+                        await videoTrack.applyConstraints({ advanced: [advancedConstraints] });
+                        console.log("カメラ最適化設定を適用しました", advancedConstraints);
                     } catch (e) {
-                        console.warn("ズーム設定失敗: ", e);
+                        console.warn("カメラ詳細設定の適用に失敗: ", e);
                     }
                 }
 
@@ -169,6 +181,7 @@
                 startBtn.style.display = 'none';
                 
                 video.onloadedmetadata = () => {
+                    // キャンバス解像度をビデオの生のフルHD解像度（1920x1080等）に完全一致させる
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
                     isProcessing = true;
@@ -199,19 +212,18 @@
         function processVideo() {
             if (!isProcessing) return;
 
+            // 等倍で描画
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
             const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
             
-            // jsQRでQRコードをスキャン
+            // jsQRでスキャン
             const code = jsQR(imageData.data, imageData.width, imageData.height, {
                 inversionAttempts: "dontInvert",
             });
 
             if (code) {
-                // 前後の不要な空白を削除
                 const txt = code.data.trim();
                 
-                // 読み取ったテキストが日本語の指定位置に一致するか判定
                 if (['左上', '右上', '左下', '右下'].includes(txt)) {
                     const loc = code.location;
                     const centerX = (loc.topLeftCorner.x + loc.topRightCorner.x + loc.bottomRightCorner.x + loc.bottomLeftCorner.x) / 4;
@@ -226,32 +238,29 @@
             
             for (let key in qrPositions) {
                 let pos = qrPositions[key];
-                // 1.5秒以上古いデータは見失ったと判定
-                if (pos && (now - pos.timestamp < 1500)) {
+                // 遠距離で一瞬見失ってもチラつかないよう、生存時間を2.5秒に延長
+                if (pos && (now - pos.timestamp < 2500)) {
                     activeCount++;
                     
-                    // 検出点に青いピンを描画
+                    // フルHD画面でも見えやすいようにピンと文字を大きく
                     ctx.fillStyle = '#007aff';
                     ctx.beginPath();
-                    ctx.arc(pos.x, pos.y, 8, 0, 2 * Math.PI);
+                    ctx.arc(pos.x, pos.y, 14, 0, 2 * Math.PI);
                     ctx.fill();
                     
-                    // 画面に「右上」などのラベルを表示
                     ctx.fillStyle = 'white';
-                    ctx.font = 'bold 16px sans-serif';
-                    ctx.fillText(key, pos.x + 12, pos.y + 6);
+                    ctx.font = 'bold 32px sans-serif'; // 文字を大きく
+                    ctx.fillText(key, pos.x + 20, pos.y + 10);
                 } else {
                     qrPositions[key] = null;
                 }
             }
 
-            // 4つすべて揃った場合
             if (activeCount === 4) {
                 lockCounter++;
 
-                // 4点を結ぶ枠線を描画
                 ctx.strokeStyle = '#34c759';
-                ctx.lineWidth = 5;
+                ctx.lineWidth = 8; // 線を太く
                 ctx.beginPath();
                 ctx.moveTo(qrPositions['左上'].x, qrPositions['左上'].y);
                 ctx.lineTo(qrPositions['右上'].x, qrPositions['右上'].y);
