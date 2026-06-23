@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出 ➔ ボタン押して撮影</title>
+    <title>QRコード4点検出（日本語対応）</title>
     <style>
         body {
             margin: 0;
@@ -32,7 +32,6 @@
             display: block;
             transition: border-color 0.3s;
         }
-        /* 4点ロック時のキャンバス枠線 */
         canvas.locked {
             border-color: #34c759;
             box-shadow: 0 0 15px rgba(52, 199, 89, 0.5);
@@ -55,7 +54,6 @@
             background-color: #555;
             cursor: not-allowed;
         }
-        /* 撮影開始ボタン */
         #shoot-btn {
             background-color: #34c759;
             display: none;
@@ -80,18 +78,18 @@
             100% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0); }
         }
     </style>
-    <script async src="https://docs.opencv.org/4.x/opencv.js" id="opencv-src"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 </head>
 <body>
 
-    <div id="status">OpenCV.jsを読み込んでいます...</div>
+    <div id="status">システムを読み込んでいます...</div>
     
     <div class="container">
         <video id="camera-view" autoplay playsinline muted></video>
         <canvas id="canvas-output"></canvas>
     </div>
 
-    <button id="start-btn" class="btn" disabled>システム開始</button>
+    <button id="start-btn" class="btn">システム開始</button>
     <button id="shoot-btn" class="btn">📸 撮影開始できます</button>
 
     <input type="file" id="camera-trigger" accept="image/*" capture="environment">
@@ -105,34 +103,27 @@
         const statusText = document.getElementById('status');
         const cameraTrigger = document.getElementById('camera-trigger');
 
-        let src, dst, hsv, mask, contours, hierarchy;
         let isProcessing = false;
-        
         let lockCounter = 0;
-        const REQUIRED_FRAMES = 15; // 約0.5秒間安定したらボタンを表示
+        const REQUIRED_FRAMES = 10; // 約0.3秒間安定したらロック
 
-        // OpenCV.js の読み込み完了を待つ
-        document.getElementById('opencv-src').addEventListener('load', () => {
-            statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
-            startBtn.disabled = false;
-        });
+        // 日本語のキーに変更
+        let qrPositions = { '左上': null, '右上': null, '左下': null, '右下': null };
+
+        statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
 
         startBtn.addEventListener('click', async () => {
-            statusText.innerText = "広角スキャン用カメラを探索中...";
+            statusText.innerText = "iPhoneの広角スキャン用カメラを探索中...";
             try {
-                // 1. まず通常の背面カメラで権限を取得
                 const initStream = await navigator.mediaDevices.getUserMedia({ 
                     video: { facingMode: 'environment' } 
                 });
                 initStream.getTracks().forEach(track => track.stop());
 
-                // 2. 利用可能な全カメラデバイスを取得
                 const devices = await navigator.mediaDevices.enumerateDevices();
                 const videoDevices = devices.filter(device => device.kind === 'videoinput');
 
                 let targetDeviceId = null;
-
-                // 3. 広角（0.5x）カメラの絞り込みロジック
                 const wideDevice = videoDevices.find(d => {
                     const label = d.label.toLowerCase();
                     return label.includes('ultra') || label.includes('wide') || label.includes('0.5') || label.includes('超広角');
@@ -140,18 +131,15 @@
 
                 if (wideDevice) {
                     targetDeviceId = wideDevice.deviceId;
-                    console.log("広角レンズを検出しました: " + wideDevice.label);
                 } else if (videoDevices.length > 1) {
                     targetDeviceId = videoDevices[videoDevices.length - 1].deviceId;
-                    console.log("カメラ名から判別不能なため、末尾のカメラIDを適用します。");
                 }
 
-                // 4. 指定したカメラID（または標準背面）でストリームを開始
                 const constraints = {
                     audio: false,
                     video: {
-                        width: { ideal: 640 },
-                        height: { ideal: 480 }
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
                     }
                 };
 
@@ -163,7 +151,6 @@
 
                 const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 
-                // 5. ズーム倍率を最小（広角側）に強制設定する処理
                 const videoTrack = stream.getVideoTracks()[0];
                 const capabilities = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
                 
@@ -172,9 +159,8 @@
                         await videoTrack.applyConstraints({
                             advanced: [{ zoom: capabilities.zoom.min }]
                         });
-                        console.log("ズーム倍率を最小に設定しました: " + capabilities.zoom.min);
                     } catch (e) {
-                        console.warn("ズーム倍率の設定に失敗しました: ", e);
+                        console.warn("ズーム設定失敗: ", e);
                     }
                 }
 
@@ -185,43 +171,20 @@
                 video.onloadedmetadata = () => {
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
-                    
-                    src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-                    dst = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
-                    hsv = new cv.Mat();
-                    mask = new cv.Mat();
-                    contours = new cv.MatVector();
-                    hierarchy = new cv.Mat();
-
                     isProcessing = true;
-                    statusText.innerText = "黄緑の丸4つを画面内に収めてください（広角モード）";
+                    statusText.innerText = "4つのQRコード（左上, 右上, 左下, 右下）を配置してください";
                     requestAnimationFrame(processVideo);
                 };
             } catch (error) {
-                statusText.innerText = "カメラ起動失敗: " + error.message + " (通常の背面カメラで再試行します)";
-                try {
-                    const fallbackStream = await navigator.mediaDevices.getUserMedia({
-                        audio: false,
-                        video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
-                    });
-                    video.srcObject = fallbackStream;
-                    video.play();
-                    startBtn.style.display = 'none';
-                    isProcessing = true;
-                    requestAnimationFrame(processVideo);
-                } catch (fallbackError) {
-                    statusText.innerText = "完全な起動失敗: " + fallbackError.message;
-                }
+                statusText.innerText = "カメラ起動失敗: " + error.message;
             }
         });
 
-        // ユーザーが「撮影開始できます」ボタンを押した時
         shootBtn.addEventListener('click', () => {
             isProcessing = false; 
             cameraTrigger.click(); 
         });
 
-        // ネイティブカメラでの撮影が完了してブラウザに戻ってきた時
         cameraTrigger.addEventListener('change', (e) => {
             if (e.target.files.length > 0) {
                 statusText.innerHTML = `<span style="color: #34c759;">🎉 写真の取り込みに成功しました！</span>`;
@@ -237,83 +200,83 @@
             if (!isProcessing) return;
 
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            src.data.set(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            
+            // jsQRでQRコードをスキャン
+            const code = jsQR(imageData.data, imageData.width, imageData.height, {
+                inversionAttempts: "dontInvert",
+            });
 
-            cv.GaussianBlur(src, dst, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
-            cv.cvtColor(dst, hsv, cv.COLOR_RGBA2RGB);
-            cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
-
-            // 黄緑（ライムグリーン）の抽出（遠くの小さなマーカー用に少し下限を緩和）
-            let low = cv.matFromArray(3, 1, cv.CV_8U, [35, 60, 50]);
-            let high = cv.matFromArray(3, 1, cv.CV_8U, [85, 255, 255]);
-            cv.inRange(hsv, low, high, mask);
-            low.delete(); high.delete();
-
-            cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-            let validCenters = [];
-
-            for (let i = 0; i < contours.size(); ++i) {
-                let cnt = contours.get(i);
-                let area = cv.contourArea(cnt);
-
-                // 0.5倍レンズで小さく映るため、面積の下限を「15」に緩和
-                if (area > 15) {
-                    let rect = cv.boundingRect(cnt);
-                    let aspectRatio = rect.width / rect.height;
-
-                    // 真円度の代わりに「縦横比」で判定
-                    // 超広角の歪みで長細くなっても、比率が 0.4 〜 2.5 の間ならマーカー候補とする
-                    if (aspectRatio > 0.4 && aspectRatio < 2.5) {
-                        let M = cv.moments(cnt);
-                        if (M.m00 !== 0) {
-                            validCenters.push({ x: M.m10 / M.m00, y: M.m01 / M.m00 });
-                        }
-                    }
+            if (code) {
+                // 前後の不要な空白を削除
+                const txt = code.data.trim();
+                
+                // 読み取ったテキストが日本語の指定位置に一致するか判定
+                if (['左上', '右上', '左下', '右下'].includes(txt)) {
+                    const loc = code.location;
+                    const centerX = (loc.topLeftCorner.x + loc.topRightCorner.x + loc.bottomRightCorner.x + loc.bottomLeftCorner.x) / 4;
+                    const centerY = (loc.topLeftCorner.y + loc.topRightCorner.y + loc.bottomRightCorner.y + loc.bottomLeftCorner.y) / 4;
+                    
+                    qrPositions[txt] = { x: centerX, y: centerY, timestamp: Date.now() };
                 }
-                cnt.delete();
             }
 
-            // 4つのマーカーが綺麗に見つかっているか？
-            if (validCenters.length === 4) {
+            let activeCount = 0;
+            const now = Date.now();
+            
+            for (let key in qrPositions) {
+                let pos = qrPositions[key];
+                // 1.5秒以上古いデータは見失ったと判定
+                if (pos && (now - pos.timestamp < 1500)) {
+                    activeCount++;
+                    
+                    // 検出点に青いピンを描画
+                    ctx.fillStyle = '#007aff';
+                    ctx.beginPath();
+                    ctx.arc(pos.x, pos.y, 8, 0, 2 * Math.PI);
+                    ctx.fill();
+                    
+                    // 画面に「右上」などのラベルを表示
+                    ctx.fillStyle = 'white';
+                    ctx.font = 'bold 16px sans-serif';
+                    ctx.fillText(key, pos.x + 12, pos.y + 6);
+                } else {
+                    qrPositions[key] = null;
+                }
+            }
+
+            // 4つすべて揃った場合
+            if (activeCount === 4) {
                 lockCounter++;
 
-                validCenters.sort((a, b) => a.y - b.y);
-                let topTwo = [validCenters[0], validCenters[1]].sort((a, b) => a.x - b.x);
-                let bottomTwo = [validCenters[2], validCenters[3]].sort((a, b) => a.x - b.x);
-                const pts = [topTwo[0], topTwo[1], bottomTwo[1], bottomTwo[0]];
-
-                // 緑の四角い枠線を描画
+                // 4点を結ぶ枠線を描画
                 ctx.strokeStyle = '#34c759';
                 ctx.lineWidth = 5;
                 ctx.beginPath();
-                ctx.moveTo(pts[0].x, pts[0].y);
-                ctx.lineTo(pts[1].x, pts[1].y);
-                ctx.lineTo(pts[2].x, pts[2].y);
-                ctx.lineTo(pts[3].x, pts[3].y);
+                ctx.moveTo(qrPositions['左上'].x, qrPositions['左上'].y);
+                ctx.lineTo(qrPositions['右上'].x, qrPositions['右上'].y);
+                ctx.lineTo(qrPositions['右下'].x, qrPositions['右下'].y);
+                ctx.lineTo(qrPositions['左下'].x, qrPositions['左下'].y);
                 ctx.closePath();
                 ctx.stroke();
 
                 if (lockCounter >= REQUIRED_FRAMES) {
                     canvas.classList.add('locked');
                     shootBtn.style.display = 'block';
-                    statusText.innerHTML = `<span style="color: #34c759;">🟢 領域をロックしました。撮影ボタンを押してください</span>`;
+                    statusText.innerHTML = `<span style="color: #34c759;">🟢 すべてのQRコードをロックしました。撮影可能です</span>`;
                 } else {
-                    statusText.innerHTML = `🟡 領域を確認中...`;
+                    statusText.innerHTML = `🟡 領域を固定中...`;
                 }
             } else {
                 lockCounter = 0;
                 shootBtn.style.display = 'none';
                 canvas.classList.remove('locked');
-                statusText.innerHTML = `🔍 マーカーを探しています... (${validCenters.length} / 4)`;
                 
-                // 【デバッグ用】検出されたすべての候補点の中心に赤い丸を描画
-                ctx.fillStyle = 'red';
-                for(let p of validCenters) {
-                    ctx.beginPath();
-                    ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI);
-                    ctx.fill();
+                let missing = [];
+                for(let key in qrPositions) {
+                    if(!qrPositions[key]) missing.push(key);
                 }
+                statusText.innerHTML = `🔍 QRコードを探しています... 不足: [ ${missing.join(', ')} ]`;
             }
 
             requestAnimationFrame(processVideo);
