@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出（自動小分け・終了ボタン付き）</title>
+    <title>黄緑色マーカー検出（リアルタイムストレージ保存版）</title>
     <style>
         body {
             margin: 0;
@@ -62,9 +62,8 @@
             background-color: #555;
             cursor: not-allowed;
         }
-        /* 録画が自動スタートしたときに出現する終了ボタン */
         #stop-btn {
-            background-color: #ff3b30; /* 赤色 */
+            background-color: #ff3b30;
             display: none; 
         }
         #status {
@@ -106,20 +105,72 @@
         let lockCounter = 0;
         const REQUIRED_FRAMES = 300; // 10秒間安定（30fps×10）
 
-        // 録画・小分け管理用の変数
+        // 録画用
         let mediaRecorder;
-        let recordedChunks = [];
         let isRecording = false;
-        let partCounter = 1;         
-        let chunkTimerId = null;     
 
-        // ⏳ 小分けする時間の設定（ミリ秒）
-        // 5分 = 300000 / テスト時は 30000 (30秒) などに調整してください
-        const CHUNK_DURATION = 300000; 
+        // IndexedDB（ブラウザ内蔵ストレージ）の設定
+        const DB_NAME = "VideoStreamDB";
+        const STORE_NAME = "chunks";
+        let db;
+        let chunkIndex = 0;
 
-        document.getElementById('opencv-src').addEventListener('load', () => {
-            statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
-            startBtn.disabled = false;
+        // IndexedDBの初期化
+        function initDB() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(DB_NAME, 1);
+                request.onupgradeneeded = (e) => {
+                    const database = e.target.result;
+                    if (!database.objectStoreNames.contains(STORE_NAME)) {
+                        database.createObjectStore(STORE_NAME, { keyPath: "id" });
+                    }
+                };
+                request.onsuccess = (e) => {
+                    db = e.target.result;
+                    resolve();
+                };
+                request.onerror = (e) => reject(e.target.error);
+            });
+        }
+
+        // 古いデータを削除
+        function clearDB() {
+            return new Promise((resolve) => {
+                const tx = db.transaction(STORE_NAME, "readwrite");
+                const store = tx.objectStore(STORE_NAME);
+                store.clear();
+                tx.oncomplete = () => resolve();
+            });
+        }
+
+        // 1秒ごとにストレージへ書き込み（メモリを消費しない）
+        function saveChunkToDB(blob) {
+            const tx = db.transaction(STORE_NAME, "readwrite");
+            const store = tx.objectStore(STORE_NAME);
+            store.put({ id: chunkIndex++, data: blob });
+        }
+
+        // 保存時にすべてのデータを引き出す
+        function getAllChunksFromDB() {
+            return new Promise((resolve) => {
+                const tx = db.transaction(STORE_NAME, "readonly");
+                const store = tx.objectStore(STORE_NAME);
+                const request = store.getAll();
+                request.onsuccess = () => {
+                    const sorted = request.result.sort((a, b) => a.id - b.id).map(item => item.data);
+                    resolve(sorted);
+                };
+            });
+        }
+
+        document.getElementById('opencv-src').addEventListener('load', async () => {
+            try {
+                await initDB();
+                statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
+                startBtn.disabled = false;
+            } catch(e) {
+                statusText.innerText = "データベースの初期化に失敗しました: " + e.message;
+            }
         });
 
         startBtn.addEventListener('click', async () => {
@@ -145,10 +196,7 @@
 
                 const constraints = {
                     audio: false,
-                    video: {
-                        width: { ideal: 1280 },
-                        height: { ideal: 720 }
-                    }
+                    video: { width: { ideal: 1280 }, height: { ideal: 720 } }
                 };
 
                 if (targetDeviceId) {
@@ -162,15 +210,10 @@
                 // 0.5倍固定
                 const videoTrack = stream.getVideoTracks()[0];
                 const capabilities = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
-                
                 if (capabilities.zoom) {
                     try {
-                        await videoTrack.applyConstraints({
-                            advanced: [{ zoom: capabilities.zoom.min }]
-                        });
-                    } catch (e) {
-                        console.warn("ズーム倍率の設定に失敗: ", e);
-                    }
+                        await videoTrack.applyConstraints({ advanced: [{ zoom: capabilities.zoom.min }] });
+                    } catch (e) { console.warn(e); }
                 }
 
                 video.srcObject = stream;
@@ -200,37 +243,33 @@
 
                     mediaRecorder = new MediaRecorder(canvasStream, options);
                     
+                    // 🔴 1秒ごとにこまめにデータを受け取り、ストレージに逃がす
                     mediaRecorder.ondataavailable = (event) => {
                         if (event.data && event.data.size > 0) {
-                            recordedChunks.push(event.data);
+                            saveChunkToDB(event.data);
                         }
                     };
 
-                    mediaRecorder.onstop = () => {
-                        const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'video/mp4' });
-                        recordedChunks = [];
+                    mediaRecorder.onstop = async () => {
+                        statusText.innerText = "動画ファイルを生成中（数秒かかります）...";
+                        
+                        const chunks = await getAllChunksFromDB();
+                        const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'video/mp4' });
                         const url = URL.createObjectURL(blob);
+                        
                         const a = document.createElement('a');
                         a.href = url;
                         const nowTime = new Date().toISOString().replace(/[:.]/g, '-');
-                        a.download = `experiment-video-part${partCounter}-${nowTime}.mp4`;
+                        a.download = `experiment-video-${nowTime}.mp4`;
                         document.body.appendChild(a);
                         a.click();
                         document.body.removeChild(a);
                         URL.revokeObjectURL(url);
                         
-                        partCounter++; 
-
-                        // ユーザーが手動停止ボタンを押していなければ（＝isRecordingがtrueなら）次の録画を自動再開
-                        if (isRecording) {
-                            mediaRecorder.start();
-                        } else {
-                            // 手動停止された場合はシステムを初期状態に戻す
-                            stopBtn.style.display = 'none';
-                            canvas.classList.remove('locked');
-                            lockCounter = 0;
-                            statusText.innerHTML = `<span style="color: #34c759;">🎬 実験終了：すべての動画を保存しました</span>`;
-                        }
+                        stopBtn.style.display = 'none';
+                        canvas.classList.remove('locked');
+                        lockCounter = 0;
+                        statusText.innerHTML = `<span style="color: #34c759;">🎬 実験動画を保存しました</span>`;
                     };
 
                     isProcessing = true;
@@ -242,21 +281,11 @@
             }
         });
 
-        // 🔄 タイマーによる自動小分け処理
-        function startChunkSplitter() {
-            chunkTimerId = setInterval(() => {
-                if (isRecording && mediaRecorder.state === "recording") {
-                    mediaRecorder.stop();
-                }
-            }, CHUNK_DURATION);
-        }
-
-        // ⏹ ユーザーが手動で「録画終了」を押した時のイベント
+        // ⏹ 録画完全終了ボタン
         stopBtn.addEventListener('click', () => {
             if (isRecording) {
-                isRecording = false; // 先にフラグを折ることで、onstop内での自動再開ループを防止
-                clearInterval(chunkTimerId); // タイマーも破棄
-                mediaRecorder.stop(); // 撮影中の最後のパーツを止めて保存へ
+                isRecording = false;
+                mediaRecorder.stop(); 
             }
         });
 
@@ -280,20 +309,16 @@
                 cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
                 let validCenters = [];
-
                 for (let i = 0; i < contours.size(); ++i) {
                     let cnt = contours.get(i);
                     let area = cv.contourArea(cnt);
-
                     if (area > 20) {
                         let perimeter = cv.arcLength(cnt, true);
                         if (perimeter > 0) {
                             let circularity = (4 * Math.PI * area) / (perimeter * perimeter);
                             if (circularity > 0.65) { 
                                 let M = cv.moments(cnt);
-                                if (M.m00 !== 0) {
-                                    validCenters.push({ x: M.m10 / M.m00, y: M.m01 / M.m00 });
-                                }
+                                if (M.m00 !== 0) validCenters.push({ x: M.m10 / M.m00, y: M.m01 / M.m00 });
                             }
                         }
                     }
@@ -302,7 +327,6 @@
 
                 if (validCenters.length === 4) {
                     lockCounter++;
-
                     validCenters.sort((a, b) => a.y - b.y);
                     let topTwo = [validCenters[0], validCenters[1]].sort((a, b) => a.x - b.x);
                     let bottomTwo = [validCenters[2], validCenters[3]].sort((a, b) => a.x - b.x);
@@ -311,25 +335,21 @@
                     ctx.strokeStyle = '#34c759';
                     ctx.lineWidth = 5;
                     ctx.beginPath();
-                    ctx.moveTo(pts[0].x, pts[0].y);
-                    ctx.lineTo(pts[1].x, pts[1].y);
-                    ctx.lineTo(pts[2].x, pts[2].y);
-                    ctx.lineTo(pts[3].x, pts[3].y);
-                    ctx.closePath();
-                    ctx.stroke();
+                    ctx.moveTo(pts[0].x, pts[0].y); ctx.lineTo(pts[1].x, pts[1].y);
+                    ctx.lineTo(pts[2].x, pts[2].y); ctx.lineTo(pts[3].x, pts[3].y);
+                    ctx.closePath(); ctx.stroke();
 
                     if (lockCounter >= REQUIRED_FRAMES) {
                         canvas.classList.add('locked');
-                        isRecording = true;
-
-                        recordedChunks = [];
-                        partCounter = 1; 
-                        mediaRecorder.start();
-
-                        startChunkSplitter();
-                        
-                        // 【追加】自動録画が始まったら、手動終了ボタンを表示する
-                        stopBtn.style.display = 'block';
+                        async function startRecordingSequence() {
+                            await clearDB(); // データベースを綺麗にする
+                            chunkIndex = 0;
+                            isRecording = true;
+                            // タイムスライスを1000ms（1秒）に指定して録画開始。1秒ごとに保存イベントが発生。
+                            mediaRecorder.start(1000); 
+                            stopBtn.style.display = 'block';
+                        }
+                        startRecordingSequence();
                     } else {
                         let timeLeft = Math.ceil((REQUIRED_FRAMES - lockCounter) / 30);
                         statusText.innerHTML = `🟡 4点捕捉中... 画角安定まであと <span style="color: #ffcc00; font-size: 20px;">${timeLeft}</span> 秒`;
@@ -338,18 +358,13 @@
                     lockCounter = 0;
                     canvas.classList.remove('locked');
                     statusText.innerHTML = `🔍 マーカーを探しています... (${validCenters.length} / 4)`;
-                    
                     ctx.fillStyle = 'red';
                     for(let p of validCenters) {
-                        ctx.beginPath();
-                        ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI);
-                        ctx.fill();
+                        ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI); ctx.fill();
                     }
                 }
             } else {
-                // 録画中：余計な線や文字は消したまま、上部ステータスで録画状況を明示
-                let intervalMin = Math.round(CHUNK_DURATION / 60000);
-                statusText.innerHTML = `<span style="color: #34c759;">🟢 自動録画中（動画パート: ${partCounter} 本目を撮影中... / ${intervalMin}分毎に自動保存）</span>`;
+                statusText.innerHTML = `<span style="color: #34c759;">🟢 長時間録画中（スマホのストレージへ直接保存しています。実験中は完全放置でOK）</span>`;
             }
 
             requestAnimationFrame(processVideo);
