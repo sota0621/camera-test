@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出（自動録画開始・Web完結型）</title>
+    <title>黄緑色マーカー検出（10秒安定後自動録画・写真なし）</title>
     <style>
         body {
             margin: 0;
@@ -62,11 +62,6 @@
             background-color: #555;
             cursor: not-allowed;
         }
-        #shoot-btn {
-            background-color: #34c759;
-            display: none;
-            animation: pulse 1.5s infinite;
-        }
         #stop-record-btn {
             background-color: #ff3b30; /* 録画停止ボタン */
             display: none; /* 自動録画が始まったら出現 */
@@ -78,11 +73,6 @@
             text-align: center;
             min-height: 24px;
             padding: 0 10px;
-        }
-        @keyframes pulse {
-            0% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0.7); }
-            70% { box-shadow: 0 0 0 10px rgba(52, 199, 89, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(52, 199, 89, 0); }
         }
     </style>
     <script async src="https://docs.opencv.org/4.x/opencv.js" id="opencv-src"></script>
@@ -98,7 +88,6 @@
 
     <div class="btn-container">
         <button id="start-btn" class="btn" disabled>システム開始</button>
-        <button id="shoot-btn" class="btn">📸 写真を保存する</button>
         <button id="stop-record-btn" class="btn">⏹ 録画を停止して保存</button>
     </div>
 
@@ -107,7 +96,6 @@
         const canvas = document.getElementById('canvas-output');
         const ctx = canvas.getContext('2d');
         const startBtn = document.getElementById('start-btn');
-        const shootBtn = document.getElementById('shoot-btn');
         const stopRecordBtn = document.getElementById('stop-record-btn');
         const statusText = document.getElementById('status');
 
@@ -115,7 +103,8 @@
         let isProcessing = false;
         
         let lockCounter = 0;
-        const REQUIRED_FRAMES = 15;
+        // 30fps換算で10秒間 = 300フレーム連続安定を条件にする
+        const REQUIRED_FRAMES = 300; 
 
         // 録画用の変数
         let mediaRecorder;
@@ -242,22 +231,10 @@
             if (isRecording) {
                 mediaRecorder.stop();
                 isRecording = false;
-                stopRecordBtn.style.display = 'none'; // 停止したら隠す
+                stopRecordBtn.style.display = 'none'; // 停止したらボタンを隠す
+                canvas.classList.remove('locked');
+                lockCounter = 0; // 次の実験に向けてカウントをリセット
             }
-        });
-
-        // 📸 写真保存ボタンのイベント
-        shootBtn.addEventListener('click', () => {
-            const dataURI = canvas.toDataURL('image/jpeg', 0.95);
-            const link = document.createElement('a');
-            const nowTime = new Date().toISOString().replace(/[:.]/g, '-');
-            link.download = `captured-frame-${nowTime}.jpg`;
-            link.href = dataURI;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-
-            statusText.innerHTML = `<span style="color: #34c759;">🎉 0.5倍の写真を直接保存しました！</span>`;
         });
 
         function processVideo() {
@@ -287,7 +264,7 @@
                     let perimeter = cv.arcLength(cnt, true);
                     if (perimeter > 0) {
                         let circularity = (4 * Math.PI * area) / (perimeter * perimeter);
-                        if (circularity > 0.65) { 
+                        if (circularity > 0.7) { 
                             let M = cv.moments(cnt);
                             if (M.m00 !== 0) {
                                 validCenters.push({ x: M.m10 / M.m00, y: M.m01 / M.m00 });
@@ -299,13 +276,17 @@
             }
 
             if (validCenters.length === 4) {
-                lockCounter++;
+                // まだ録画が始まっていない（安定待ち中、またはロック確定の瞬間）場合のみカウントを進める
+                if (!isRecording) {
+                    lockCounter++;
+                }
 
                 validCenters.sort((a, b) => a.y - b.y);
                 let topTwo = [validCenters[0], validCenters[1]].sort((a, b) => a.x - b.x);
                 let bottomTwo = [validCenters[2], validCenters[3]].sort((a, b) => a.x - b.x);
                 const pts = [topTwo[0], topTwo[1], bottomTwo[1], bottomTwo[0]];
 
+                // 緑の枠線を描画
                 ctx.strokeStyle = '#34c759';
                 ctx.lineWidth = 5;
                 ctx.beginPath();
@@ -318,32 +299,32 @@
 
                 if (lockCounter >= REQUIRED_FRAMES) {
                     canvas.classList.add('locked');
-                    shootBtn.style.display = 'block'; // 写真保存ボタンを表示
 
-                    // 【自動録画開始ロジック】
-                    // 4点ロックが完了し、かつ現在録画中でなければ、自動で録画をスタートさせる
+                    // 【10秒安定後の自動録画開始】
                     if (!isRecording) {
                         recordedChunks = [];
                         mediaRecorder.start();
                         isRecording = true;
                     }
-                    // 停止ボタンを表示
-                    stopRecordBtn.style.display = 'block';
+                    stopRecordBtn.style.display = 'block'; // 録画停止ボタンを出現させる
                 } else {
-                    if (!isRecording) statusText.innerHTML = `🟡 領域を確認中...`;
+                    if (!isRecording) {
+                        // 10秒の残りカウントダウンを画面に表示
+                        let timeLeft = Math.ceil((REQUIRED_FRAMES - lockCounter) / 30);
+                        statusText.innerHTML = `🟡 4点捕捉中... 画角安定まであと <span style="color: #ffcc00; font-size: 20px;">${timeLeft}</span> 秒`;
+                    }
                 }
             } else {
-                lockCounter = 0;
-                shootBtn.style.display = 'none'; 
-                canvas.classList.remove('locked');
-                
-                // ※4点を見失っても、撮影中の実験動画が途切れないように、自動録画は停止しない仕様にしています
-                // (録画を止めたい場合は、出現している赤色の「録画を停止して保存」ボタンをタップします)
-
+                // 録画が開始される前に4点を見失ったらカウントダウンを即リセット（厳格化）
                 if (!isRecording) {
+                    lockCounter = 0;
+                    canvas.classList.remove('locked');
                     statusText.innerHTML = `🔍 マーカーを探しています... (${validCenters.length} / 4)`;
                 }
                 
+                // ※一度自動録画がスタートした後は、手がブレて見失っても録画を途切れさせないように維持します
+                
+                // 捕捉できている点を赤丸でデバッグ表示
                 ctx.fillStyle = 'red';
                 for(let p of validCenters) {
                     ctx.beginPath();
@@ -352,7 +333,7 @@
                 }
             }
 
-            // 録画中のインジケータ描画
+            // 録画中のインジケータとテキストの描画
             if (isRecording) {
                 ctx.fillStyle = '#ff3b30';
                 ctx.beginPath();
@@ -361,7 +342,7 @@
                 ctx.fillStyle = 'white';
                 ctx.font = 'bold 16px sans-serif';
                 ctx.fillText('REC', 40, 31);
-                statusText.innerHTML = `<span style="color: #ff3b30;">🔴 ロック完了により実験映像を自動録画中...</span>`;
+                statusText.innerHTML = `<span style="color: #ff3b30;">🔴 画角安定を確認：実験映像を録画中...</span>`;
             }
 
             requestAnimationFrame(processVideo);
