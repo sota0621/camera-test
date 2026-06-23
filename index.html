@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出（長時間録画・確実起動版）</title>
+    <title>黄緑色マーカー検出（自動小分け録画・完全自動版）</title>
     <style>
         body {
             margin: 0;
@@ -44,17 +44,16 @@
             margin: 20px;
         }
         .btn {
-            padding: 18px 30px;
-            font-size: 20px;
+            padding: 15px 30px;
+            font-size: 18px;
             color: white;
             border: none;
-            border-radius: 12px;
+            border-radius: 8px;
             cursor: pointer;
             font-weight: bold;
             transition: all 0.3s;
-            width: 280px;
+            width: 260px;
             text-align: center;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
         }
         #start-btn {
             background-color: #007aff;
@@ -62,16 +61,6 @@
         #start-btn:disabled {
             background-color: #555;
             cursor: not-allowed;
-            box-shadow: none;
-        }
-        /* 10秒安定した時に出現するボタン */
-        #launch-camera-btn {
-            background-color: #ff3b30; /* 目立つ赤色 */
-            display: none;
-            animation: pulse 1.5s infinite;
-        }
-        #launch-camera-btn:active {
-            transform: scale(0.95);
         }
         #status {
             font-size: 16px;
@@ -80,14 +69,6 @@
             text-align: center;
             min-height: 24px;
             padding: 0 10px;
-        }
-        #camera-trigger {
-            display: none;
-        }
-        @keyframes pulse {
-            0% { box-shadow: 0 0 0 0 rgba(255, 59, 48, 0.7); }
-            70% { box-shadow: 0 0 0 15px rgba(255, 59, 48, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(255, 59, 48, 0); }
         }
     </style>
     <script async src="https://docs.opencv.org/4.x/opencv.js" id="opencv-src"></script>
@@ -103,26 +84,32 @@
 
     <div class="btn-container">
         <button id="start-btn" class="btn" disabled>システム開始</button>
-        <button id="launch-camera-btn" class="btn">🔴 録画を開始する</button>
     </div>
-
-    <input type="file" id="camera-trigger" accept="video/*" capture="environment">
 
     <script>
         const video = document.getElementById('camera-view');
         const canvas = document.getElementById('canvas-output');
         const ctx = canvas.getContext('2d');
         const startBtn = document.getElementById('start-btn');
-        const launchCameraBtn = document.getElementById('launch-camera-btn');
         const statusText = document.getElementById('status');
-        const cameraTrigger = document.getElementById('camera-trigger');
 
         let src, dst, hsv, mask, contours, hierarchy;
         let isProcessing = false;
-        let isStable = false; // 10秒判定がクリアされたかどうかのフラグ
         
         let lockCounter = 0;
         const REQUIRED_FRAMES = 300; // 10秒間安定（30fps×10）
+
+        // 録画・小分け管理用の変数
+        let mediaRecorder;
+        let recordedChunks = [];
+        let isRecording = false;
+        let partCounter = 1;         // 動画のパート番号
+        let chunkTimerId = null;     // 自動小分け用のタイマー
+
+        // ⏳ 小分けする時間の設定（ミリ秒）
+        // 実験本番時は [5分 = 300000] にしてください。
+        // 最初はテストとして、正しく自動保存されるか確認するために [30秒 = 30000] などに書き換えて試すのをおすすめします。
+        const CHUNK_DURATION = 300000; 
 
         document.getElementById('opencv-src').addEventListener('load', () => {
             statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
@@ -166,7 +153,7 @@
 
                 const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 
-                // 0.5倍固定
+                // 0.5倍固定（初期ズームを最小値に設定）
                 const videoTrack = stream.getVideoTracks()[0];
                 const capabilities = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
                 
@@ -195,6 +182,48 @@
                     contours = new cv.MatVector();
                     hierarchy = new cv.Mat();
 
+                    // Canvasから映像ストリームをキャプチャ（30fps）
+                    const canvasStream = canvas.captureStream(30);
+                    
+                    let options = { mimeType: 'video/mp4; codecs=avc1' };
+                    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                        options = { mimeType: 'video/webm; codecs=vp9' };
+                    }
+                    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                        options = { mimeType: '' }; 
+                    }
+
+                    mediaRecorder = new MediaRecorder(canvasStream, options);
+                    
+                    mediaRecorder.ondataavailable = (event) => {
+                        if (event.data && event.data.size > 0) {
+                            recordedChunks.push(event.data);
+                        }
+                    };
+
+                    // 動画が停止（区切られた）したときの保存処理
+                    mediaRecorder.onstop = () => {
+                        const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'video/mp4' });
+                        recordedChunks = [];
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        const nowTime = new Date().toISOString().replace(/[:.]/g, '-');
+                        // ファイル名に「partX」をつけて判別しやすくします
+                        a.download = `experiment-video-part${partCounter}-${nowTime}.mp4`;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                        
+                        partCounter++; // 次のパーツ番号へ
+
+                        // もし大元の録画フラグがまだ生きていれば、即座に次の録画を裏で再開する（シームレス接続）
+                        if (isRecording) {
+                            mediaRecorder.start();
+                        }
+                    };
+
                     isProcessing = true;
                     statusText.innerText = "黄緑の丸4つを画面内に収めてください";
                     requestAnimationFrame(processVideo);
@@ -204,109 +233,113 @@
             }
         });
 
-        // 🔴 ユーザーが手動でボタンをタップした時（これならブラウザに絶対にブロックされません）
-        launchCameraBtn.addEventListener('click', () => {
-            cameraTrigger.click();
-        });
-
-        // 長時間撮影が終了して戻ってきたとき
-        cameraTrigger.addEventListener('change', (e) => {
-            if (e.target.files.length > 0) {
-                statusText.innerHTML = `<span style="color: #34c759;">🎉 動画がカメラロールに直接保存されました！</span>`;
-            }
-            // リセットして次の計測へ
-            lockCounter = 0;
-            isStable = false;
-            launchCameraBtn.style.display = 'none';
-            canvas.classList.remove('locked');
-            isProcessing = true;
-            requestAnimationFrame(processVideo);
-        });
+        // 🔄 指定時間ごとに録画を区切って自動保存をループさせる関数
+        function startChunkSplitter() {
+            chunkTimerId = setInterval(() => {
+                if (isRecording && mediaRecorder.state === "recording") {
+                    // 一度レコーダーを止め、onstopイベントを発生させてダウンロードを実行。
+                    // その後、onstop内のロジックで自動的に次のpartの録画が再開されます。
+                    mediaRecorder.stop();
+                }
+            }, CHUNK_DURATION);
+        }
 
         function processVideo() {
             if (!isProcessing) return;
 
+            // カメラ映像をキャンバスに100%描画（録画されるベース映像）
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            src.data.set(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
 
-            cv.GaussianBlur(src, dst, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
-            cv.cvtColor(dst, hsv, cv.COLOR_RGBA2RGB);
-            cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
+            // 録画がまだ始まっていない（安定待ち中）の場合のみ、マーカーの解析と線・文字の描画を行う
+            if (!isRecording) {
+                src.data.set(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
 
-            let low = cv.matFromArray(3, 1, cv.CV_8U, [35, 60, 50]);
-            let high = cv.matFromArray(3, 1, cv.CV_8U, [85, 255, 255]);
-            cv.inRange(hsv, low, high, mask);
-            low.delete(); high.delete();
+                cv.GaussianBlur(src, dst, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
+                cv.cvtColor(dst, hsv, cv.COLOR_RGBA2RGB);
+                cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
 
-            cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+                let low = cv.matFromArray(3, 1, cv.CV_8U, [35, 60, 50]);
+                let high = cv.matFromArray(3, 1, cv.CV_8U, [85, 255, 255]);
+                cv.inRange(hsv, low, high, mask);
+                low.delete(); high.delete();
 
-            let validCenters = [];
+                cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-            for (let i = 0; i < contours.size(); ++i) {
-                let cnt = contours.get(i);
-                let area = cv.contourArea(cnt);
+                let validCenters = [];
 
-                if (area > 20) {
-                    let perimeter = cv.arcLength(cnt, true);
-                    if (perimeter > 0) {
-                        let circularity = (4 * Math.PI * area) / (perimeter * perimeter);
-                        if (circularity > 0.65) { 
-                            let M = cv.moments(cnt);
-                            if (M.m00 !== 0) {
-                                validCenters.push({ x: M.m10 / M.m00, y: M.m01 / M.m00 });
+                for (let i = 0; i < contours.size(); ++i) {
+                    let cnt = contours.get(i);
+                    let area = cv.contourArea(cnt);
+
+                    if (area > 20) {
+                        let perimeter = cv.arcLength(cnt, true);
+                        if (perimeter > 0) {
+                            let circularity = (4 * Math.PI * area) / (perimeter * perimeter);
+                            if (circularity > 0.65) { 
+                                let M = cv.moments(cnt);
+                                if (M.m00 !== 0) {
+                                    validCenters.push({ x: M.m10 / M.m00, y: M.m01 / M.m00 });
+                                }
                             }
                         }
                     }
+                    cnt.delete();
                 }
-                cnt.delete();
-            }
 
-            if (validCenters.length === 4) {
-                // 10秒判定がまだクリアされていない場合のみカウントを進める
-                if (!isStable) {
+                if (validCenters.length === 4) {
                     lockCounter++;
-                }
 
-                validCenters.sort((a, b) => a.y - b.y);
-                let topTwo = [validCenters[0], validCenters[1]].sort((a, b) => a.x - b.x);
-                let bottomTwo = [validCenters[2], validCenters[3]].sort((a, b) => a.x - b.x);
-                const pts = [topTwo[0], topTwo[1], bottomTwo[1], bottomTwo[0]];
+                    validCenters.sort((a, b) => a.y - b.y);
+                    let topTwo = [validCenters[0], validCenters[1]].sort((a, b) => a.x - b.x);
+                    let bottomTwo = [validCenters[2], validCenters[3]].sort((a, b) => a.x - b.x);
+                    const pts = [topTwo[0], topTwo[1], bottomTwo[1], bottomTwo[0]];
 
-                // 緑の四角枠を描画
-                ctx.strokeStyle = '#34c759';
-                ctx.lineWidth = 5;
-                ctx.beginPath();
-                ctx.moveTo(pts[0].x, pts[0].y);
-                ctx.lineTo(pts[1].x, pts[1].y);
-                ctx.lineTo(pts[2].x, pts[2].y);
-                ctx.lineTo(pts[3].x, pts[3].y);
-                ctx.closePath();
-                ctx.stroke();
+                    // 10秒キープの間だけ「緑色の四角枠」を描画
+                    ctx.strokeStyle = '#34c759';
+                    ctx.lineWidth = 5;
+                    ctx.beginPath();
+                    ctx.moveTo(pts[0].x, pts[0].y);
+                    ctx.lineTo(pts[1].x, pts[1].y);
+                    ctx.lineTo(pts[2].x, pts[2].y);
+                    ctx.lineTo(pts[3].x, pts[3].y);
+                    ctx.closePath();
+                    ctx.stroke();
 
-                if (lockCounter >= REQUIRED_FRAMES) {
-                    isStable = true;
-                    canvas.classList.add('locked');
-                    launchCameraBtn.style.display = 'block'; // 赤い録画ボタンを出現させる
-                    statusText.innerHTML = `<span style="color: #34c759; font-size: 18px;">🟢 画角が完全に安定しました！ボタンを押して録画を開始してください</span>`;
+                    if (lockCounter >= REQUIRED_FRAMES) {
+                        // 10秒が経過し、画角が完全に安定した瞬間
+                        canvas.classList.add('locked');
+                        isRecording = true;
+
+                        // 【完全自動録画スタート】
+                        recordedChunks = [];
+                        partCounter = 1; 
+                        mediaRecorder.start();
+
+                        // 小分け保存タイマーを始動
+                        startChunkSplitter();
+                    } else {
+                        let timeLeft = Math.ceil((REQUIRED_FRAMES - lockCounter) / 30);
+                        statusText.innerHTML = `🟡 4点捕捉中... 画角安定まであと <span style="color: #ffcc00; font-size: 20px;">${timeLeft}</span> 秒`;
+                    }
                 } else {
-                    let timeLeft = Math.ceil((REQUIRED_FRAMES - lockCounter) / 30);
-                    statusText.innerHTML = `🟡 4点捕捉中... 画角安定まであと <span style="color: #ffcc00; font-size: 20px;">${timeLeft}</span> 秒`;
-                }
-            } else {
-                // 10秒経過する前に見失ったらカウントリセット
-                if (!isStable) {
                     lockCounter = 0;
                     canvas.classList.remove('locked');
                     statusText.innerHTML = `🔍 マーカーを探しています... (${validCenters.length} / 4)`;
+                    
+                    // 探している最中のみ、捕捉できている点に「赤丸」を表示
+                    ctx.fillStyle = 'red';
+                    for(let p of validCenters) {
+                        ctx.beginPath();
+                        ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI);
+                        ctx.fill();
+                    }
                 }
-                
-                // 認識できている点のデバッグ用赤丸
-                ctx.fillStyle = 'red';
-                for(let p of validCenters) {
-                    ctx.beginPath();
-                    ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI);
-                    ctx.fill();
-                }
+            } else {
+                // 録画中（isRecording === true）の場合：
+                // 線やドットは一切上書き描画せず、純粋な生映像だけを記録します。
+                // 現在の録画パート数を上部のステータス欄でユーザーに通知します。
+                let intervalMin = Math.round(CHUNK_DURATION / 60000);
+                statusText.innerHTML = `<span style="color: #34c759;">🟢 録画自動化ループ作動中（動画パート: ${partCounter} 本目を撮影中... / ${intervalMin}分毎に自動保存）</span>`;
             }
 
             requestAnimationFrame(processVideo);
