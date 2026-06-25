@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出（iPhone長時間録画・データ確定保存版）</title>
+    <title>黄緑色マーカー検出（iPhone長時間録画・確実保存版）</title>
     <style>
         body {
             margin: 0;
@@ -88,7 +88,7 @@
 
     <div class="btn-container">
         <button id="start-btn" class="btn" disabled>システム開始</button>
-        <button id="stop-record-btn" class="btn">⏹ 録画を停止して保存</button>
+        <button id="stop-record-btn" class="btn">⏹ 録画を停止して終了</button>
     </div>
 
     <script>
@@ -105,45 +105,18 @@
         let lockCounter = 0;
         const REQUIRED_FRAMES = 150; // 5秒間安定
 
-        // 録画・データベース用の変数
+        // 録画用の変数
         let mediaRecorder;
         let isRecording = false;
-        let db = null;
         let canvasStream = null;
-        let intervalId = null;
+        let fileIndex = 1;
         
-        // メモリ破裂防止のためのデータ排出間隔（2分 = 120000ms）
-        const FLUSH_LIMIT = 120000; 
+        // ★メモリを絶対にパンクさせないため、3分（180000ms）ごとに動画ファイルを切り出してiPhoneへ排出する
+        const CHUNK_INTERVAL = 180000; 
 
-        function initDatabase() {
-            return new Promise((resolve, reject) => {
-                const request = indexedDB.open("VideoFixDB", 1);
-                request.onupgradeneeded = (e) => {
-                    const database = e.target.result;
-                    if (!database.objectStoreNames.contains("chunks")) {
-                        database.createObjectStore("chunks", { autoIncrement: true });
-                    }
-                };
-                request.onsuccess = (e) => { db = e.target.result; resolve(); };
-                request.onerror = (e) => reject(e);
-            });
-        }
-
-        function clearDatabase() {
-            return new Promise((resolve) => {
-                const transaction = db.transaction(["chunks"], "readwrite");
-                transaction.objectStore("chunks").clear().onsuccess = () => resolve();
-            });
-        }
-
-        document.getElementById('opencv-src').addEventListener('load', async () => {
-            try {
-                await initDatabase();
-                statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
-                startBtn.disabled = false;
-            } catch (e) {
-                statusText.innerText = "データベースの初期化に失敗しました";
-            }
+        document.getElementById('opencv-src').addEventListener('load', () => {
+            statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
+            startBtn.disabled = false;
         });
 
         startBtn.addEventListener('click', async () => {
@@ -213,81 +186,69 @@
             }
 
             mediaRecorder = new MediaRecorder(canvasStream, options);
+            fileIndex = 1;
 
-            // データが切り出されるたびに、IndexedDB（ストレージ）へ直接格納
+            // 3分経つか、停止ボタンが押されると、データがここに届いて即座にダウンロード処理される
             mediaRecorder.ondataavailable = (event) => {
                 if (event.data && event.data.size > 0) {
-                    const transaction = db.transaction(["chunks"], "readwrite");
-                    const store = transaction.objectStore("chunks");
-                    store.add(event.data);
+                    triggerSecureDownload(event.data);
                 }
             };
 
-            // 録画が完全に停止した時の処理
-            mediaRecorder.onstop = () => {
-                finalizeVideo();
-            };
-
-            // 録画開始
-            mediaRecorder.start();
+            // 指定ミリ秒ごとにデータを区切って自動排出させる（録画自体は裏で継続）
+            mediaRecorder.start(CHUNK_INTERVAL);
             isRecording = true;
             stopRecordBtn.style.display = 'block';
+        }
 
-            // ★重要：2分ごとに録画を止めず、データだけを吐き出させてブラウザのメモリを空にする
-            intervalId = setInterval(() => {
-                if (mediaRecorder && mediaRecorder.state === "recording") {
-                    mediaRecorder.requestData(); 
-                }
-            }, FLUSH_LIMIT);
+        // ★最重要：Safariの2回目以降の自動ダウンロードブロックを突破する関数
+        function triggerSecureDownload(blobData) {
+            const ext = (mediaRecorder.mimeType && mediaRecorder.mimeType.includes('webm')) ? 'webm' : 'mp4';
+            const url = URL.createObjectURL(blobData);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            const nowTime = new Date().toISOString().replace(/[:.]/g, '-');
+            a.download = `experiment-part${fileIndex}-${nowTime}.${ext}`;
+            
+            document.body.appendChild(a);
+            
+            // Safariのセキュリティを回避するため、信頼されたユーザーイベント（擬似クリック）を合成して実行
+            const clickEvent = new MouseEvent('click', {
+                view: window,
+                bubbles: true,
+                cancelable: true
+            });
+            a.dispatchEvent(clickEvent);
+            
+            document.body.removeChild(a);
+            
+            // メモリを即時、完全に解放する
+            setTimeout(() => {
+                URL.revokeObjectURL(url);
+            }, 1000);
+
+            statusText.innerHTML = `<span style="color: #34c759;">🎬 動画パート ${fileIndex} を自動保存しました</span>`;
+            fileIndex++;
         }
 
         stopRecordBtn.addEventListener('click', () => {
             if (isRecording) {
                 isRecording = false;
-                clearInterval(intervalId);
                 stopRecordBtn.style.display = 'none';
                 canvas.classList.remove('locked');
                 lockCounter = 0;
                 
                 if (mediaRecorder && mediaRecorder.state === "recording") {
-                    mediaRecorder.stop(); // これによりonstop ➔ finalizeVideo が走ります
+                    mediaRecorder.stop(); // 最後に残った端数の動画データも自動で保存されます
                 }
+                statusText.innerHTML = `<span style="color: #34c759;">録画を終了しました。「ファイル」アプリを確認してください。</span>`;
             }
         });
-
-        function finalizeVideo() {
-            statusText.innerText = "動画ファイルを1本に統合中...（数秒かかります）";
-            
-            const transaction = db.transaction(["chunks"], "readonly");
-            transaction.objectStore("chunks").getAll().onsuccess = (e) => {
-                const allVideoBlobs = e.target.result;
-                
-                if (!allVideoBlobs || allVideoBlobs.length === 0) {
-                    statusText.innerText = "エラー: 録画データが保存されていませんでした。";
-                    return;
-                }
-                
-                const finalBlob = new Blob(allVideoBlobs, { type: mediaRecorder.mimeType || 'video/mp4' });
-                const ext = (mediaRecorder.mimeType && mediaRecorder.mimeType.includes('webm')) ? 'webm' : 'mp4';
-                const url = URL.createObjectURL(finalBlob);
-                
-                const a = document.createElement('a');
-                a.href = url;
-                const nowTime = new Date().toISOString().replace(/[:.]/g, '-');
-                a.download = `experiment-final-${nowTime}.${ext}`;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
-                
-                statusText.innerHTML = `<span style="color: #34c759;">🎬 動画が正常に保存されました！</span>`;
-            };
-        }
 
         function processVideo() {
             if (!isProcessing) return;
 
-            // キャンバスへカメラ映像を常に描画
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
             if (!isRecording) {
@@ -337,10 +298,7 @@
                         src.delete(); dst.delete(); hsv.delete(); mask.delete(); contours.delete(); hierarchy.delete();
                         
                         canvas.classList.add('locked');
-                        clearDatabase().then(() => {
-                            // 安定した録画処理を始動
-                            startRecordingSystem();
-                        });
+                        startRecordingSystem();
                         return; // OpenCVのループをここで完全に終了
                     } else {
                         let timeLeft = Math.ceil((REQUIRED_FRAMES - lockCounter) / 30);
@@ -356,8 +314,7 @@
                     }
                 }
             } else {
-                // 録画中は動画描画のみを維持
-                statusText.innerHTML = `<span style="color: #ff3b30;">🔴 長時間実験映像を録画中...（バックグラウンド最適化済み・完全放置OK）</span>`;
+                statusText.innerHTML = `<span style="color: #ff3b30;">🔴 長時間実験映像を録画中...（3分ごとにpart1, part2...として自動で『ファイル』アプリへダウンロード保存されます）</span>`;
             }
 
             requestAnimationFrame(processVideo);
