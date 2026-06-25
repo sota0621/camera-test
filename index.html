@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出（iPhone長時間録画・リアルタイムプレビュー版）</title>
+    <title>黄緑色マーカー検出（iPhone完全リロード回避・超堅牢版）</title>
     <style>
         body {
             margin: 0;
@@ -33,8 +33,8 @@
             transition: border-color 0.3s;
         }
         canvas.locked {
-            border-color: #34c759;
-            box-shadow: 0 0 15px rgba(52, 199, 89, 0.5);
+            border-color: #ff3b30;
+            box-shadow: 0 0 15px rgba(255, 59, 48, 0.5);
         }
         .btn-container {
             display: flex;
@@ -105,10 +105,9 @@
         let lockCounter = 0;
         const REQUIRED_FRAMES = 150; // 5秒間安定
 
-        // 録画用・カメラストリーム用の変数
+        // 録画用・カメラ用の変数
         let mediaRecorder;
         let isRecording = false;
-        let canvasStream = null;
         let cameraStream = null;
         let fileIndex = 1;
         let animationFrameId = null;
@@ -167,7 +166,6 @@
                     hsv = new cv.Mat(); mask = new cv.Mat();
                     contours = new cv.MatVector(); hierarchy = new cv.Mat();
 
-                    canvasStream = canvas.captureStream(30);
                     isProcessing = true;
                     statusText.innerText = "黄緑の丸4つを画面内に収めてください";
                     animationFrameId = requestAnimationFrame(processVideo);
@@ -186,7 +184,8 @@
                 options = { mimeType: '' }; 
             }
 
-            mediaRecorder = new MediaRecorder(canvasStream, options);
+            // ★超重要：Canvas（画面上の見た目）ではなく、カメラの生のレンズデータ（cameraStream）を直接録画！
+            mediaRecorder = new MediaRecorder(cameraStream, options);
             fileIndex = 1;
 
             mediaRecorder.ondataavailable = (event) => {
@@ -231,15 +230,8 @@
         stopRecordBtn.addEventListener('click', () => {
             if (isRecording) {
                 isRecording = false;
-                isProcessing = false;
                 stopRecordBtn.style.display = 'none';
-                canvas.classList.remove('locked');
-                lockCounter = 0;
                 
-                if (animationFrameId) {
-                    cancelAnimationFrame(animationFrameId);
-                }
-
                 if (mediaRecorder && mediaRecorder.state === "recording") {
                     mediaRecorder.stop(); 
                 }
@@ -260,11 +252,10 @@
         function processVideo() {
             if (!isProcessing) return;
 
-            // ★超重要：録画中であっても、カメラのリアルタイム映像はCanvasへ常に描画（更新）し続ける
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
             if (!isRecording) {
-                // 録画が始まる前（スキャン中）だけ、重たいOpenCVの解析処理を動かす
+                // スキャン中（録画が始まる前）だけ、Canvasの描画とOpenCVを実行
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
                 src.data.set(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
                 cv.GaussianBlur(src, dst, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
                 cv.cvtColor(dst, hsv, cv.COLOR_RGBA2RGB);
@@ -307,12 +298,20 @@
                     ctx.lineTo(pts[3].x, pts[3].y); ctx.closePath(); ctx.stroke();
 
                     if (lockCounter >= REQUIRED_FRAMES) {
-                        // ロック確定。OpenCV用の一時メモリだけを解放して解析を抜ける
+                        // ロック確定。OpenCVメモリを完全抹消
                         src.delete(); dst.delete(); hsv.delete(); mask.delete(); contours.delete(); hierarchy.delete();
                         
+                        // 1. ループ処理を完全に停止させて、グラフィックメモリの消費をゼロにする
+                        isProcessing = false;
+                        if (animationFrameId) cancelAnimationFrame(animationFrameId);
+
+                        // 2. 画面を録画中モードの表示（赤枠・静止）に変更
                         canvas.classList.add('locked');
+                        statusText.innerHTML = `<span style="color: #ff3b30;">🔴 長時間実験映像を録画中...（3分ごとにpart1, part2...として自動で『ファイル』アプリへダウンロード保存されます）</span>`;
+
+                        // 3. カメラの生データから直接録画を開始
                         startRecordingSystem();
-                        // ここでreturnしてループを壊さず、次のフレームへ処理を継続させる
+                        return; 
                     } else {
                         let timeLeft = Math.ceil((REQUIRED_FRAMES - lockCounter) / 30);
                         statusText.innerHTML = `🟡 4点捕捉中... 画角安定まであと <span style="color: #ffcc00; font-size: 20px;">${timeLeft}</span> 秒`;
@@ -326,9 +325,6 @@
                         ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI); ctx.fill();
                     }
                 }
-            } else {
-                // 録画中：OpenCVは動かさないが、一番上の「ctx.drawImage」が毎フレーム走り、最新の映像が映り続ける
-                statusText.innerHTML = `<span style="color: #ff3b30;">🔴 長時間実験映像を録画中...（3分ごとにpart1, part2...として自動で『ファイル』アプリへダウンロード保存されます）</span>`;
             }
 
             if (isProcessing) {
