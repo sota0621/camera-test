@@ -94,16 +94,16 @@
     <script>
         const video = document.getElementById('camera-view');
         const canvas = document.getElementById('canvas-output');
-        const ctx = canvas.getContext('2d', { willReadFrequently: true }); // パフォーマンス向上
+        const ctx = canvas.getContext('2d');
         const startBtn = document.getElementById('start-btn');
         const stopRecordBtn = document.getElementById('stop-record-btn');
         const statusText = document.getElementById('status');
 
-        let src, dst, hsv, mask;
+        let src, dst, hsv, mask, contours, hierarchy;
         let isProcessing = false;
         
         let lockCounter = 0;
-        const REQUIRED_FRAMES = 150; // 10秒間安定
+        const REQUIRED_FRAMES = 300; // 10秒間安定
 
         // 録画用の変数
         let mediaRecorder;
@@ -174,11 +174,12 @@
                     canvas.width = video.videoWidth;
                     canvas.height = video.videoHeight;
                     
-                    // OpenCVの行列を初期化
                     src = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
                     dst = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
                     hsv = new cv.Mat();
                     mask = new cv.Mat();
+                    contours = new cv.MatVector();
+                    hierarchy = new cv.Mat();
 
                     const canvasStream = canvas.captureStream(30);
                     
@@ -235,12 +236,12 @@
         function processVideo() {
             if (!isProcessing) return;
 
-            // まずベースとなるカメラ映像をキャンバスに描画
+            // まずベースとなるカメラ映像をキャンバスに100%描画（これは録画中も常に行われます）
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
+            // 録画中でない（＝100秒カウント中や、探している最中）場合のみ、OpenCVでのマーカー解析と線・文字の描画を行う
             if (!isRecording) {
-                // 高速にCanvasからMatへコピー
-                cv.imread(canvas, src);
+                src.data.set(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
 
                 cv.GaussianBlur(src, dst, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
                 cv.cvtColor(dst, hsv, cv.COLOR_RGBA2RGB);
@@ -251,9 +252,6 @@
                 cv.inRange(hsv, low, high, mask);
                 low.delete(); high.delete();
 
-                // ループ内で生成・解放を繰り返すため、ここで毎回新しくインスタンス化する
-                let contours = new cv.MatVector();
-                let hierarchy = new cv.Mat();
                 cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
                 let validCenters = [];
@@ -266,7 +264,7 @@
                         let perimeter = cv.arcLength(cnt, true);
                         if (perimeter > 0) {
                             let circularity = (4 * Math.PI * area) / (perimeter * perimeter);
-                            if (circularity > 0.85) { 
+                            if (circularity > 0.65) { 
                                 let M = cv.moments(cnt);
                                 if (M.m00 !== 0) {
                                     validCenters.push({ x: M.m10 / M.m00, y: M.m01 / M.m00 });
@@ -274,12 +272,8 @@
                             }
                         }
                     }
-                    cnt.delete(); // 個々の輪郭オブジェクトを解放
+                    cnt.delete();
                 }
-
-                // 【超重要】MatVectorとMatのメモリ解放（リーク防止）
-                contours.delete();
-                hierarchy.delete();
 
                 if (validCenters.length === 4) {
                     lockCounter++;
@@ -301,12 +295,18 @@
                     ctx.stroke();
 
                     if (lockCounter >= REQUIRED_FRAMES) {
+                        // 10秒が経過し、ロックが確定した瞬間
                         canvas.classList.add('locked');
+
+                        // 自動録画をスタート
                         recordedChunks = [];
                         mediaRecorder.start();
                         isRecording = true;
+                        
+                        // 録画停止ボタンを出現させる
                         stopRecordBtn.style.display = 'block';
                     } else {
+                        // カウントダウンテキストをブラウザ上のステータス欄に表示
                         let timeLeft = Math.ceil((REQUIRED_FRAMES - lockCounter) / 30);
                         statusText.innerHTML = `🟡 4点捕捉中... 画角安定まであと <span style="color: #ffcc00; font-size: 20px;">${timeLeft}</span> 秒`;
                     }
@@ -315,6 +315,7 @@
                     canvas.classList.remove('locked');
                     statusText.innerHTML = `🔍 マーカーを探しています... (${validCenters.length} / 4)`;
                     
+                    // カウントダウンしていない間だけ、捕捉できている点に「赤丸」を表示
                     ctx.fillStyle = 'red';
                     for(let p of validCenters) {
                         ctx.beginPath();
@@ -323,6 +324,9 @@
                     }
                 }
             } else {
+                // 【重要】isRecording === true (録画中) の場合：
+                // ここではあえてctx（キャンバス）に文字や線を一切上書き描画しません。
+                // これにより、録画される映像は文字や線の入っていない「純粋な生映像」になります。
                 statusText.innerHTML = `<span style="color: #ff3b30;">🔴 画角が固定されました：実験映像を録画中...</span>`;
             }
 
