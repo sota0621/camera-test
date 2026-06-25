@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出（iPhone完全放置・超長時間対応版）</title>
+    <title>黄緑色マーカー検出（iPhone長時間録画・データ確定保存版）</title>
     <style>
         body {
             margin: 0;
@@ -110,14 +110,14 @@
         let isRecording = false;
         let db = null;
         let canvasStream = null;
-        let recorderOptions = {};
         let intervalId = null;
-
-        const SESSION_LIMIT = 120000; // ★2分ごとにMediaRecorder自体を破壊して作り直し、メモリを100%完全解放する
+        
+        // メモリ破裂防止のためのデータ排出間隔（2分 = 120000ms）
+        const FLUSH_LIMIT = 120000; 
 
         function initDatabase() {
             return new Promise((resolve, reject) => {
-                const request = indexedDB.open("VideoStableDB", 1);
+                const request = indexedDB.open("VideoFixDB", 1);
                 request.onupgradeneeded = (e) => {
                     const database = e.target.result;
                     if (!database.objectStoreNames.contains("chunks")) {
@@ -194,15 +194,6 @@
                     contours = new cv.MatVector(); hierarchy = new cv.Mat();
 
                     canvasStream = canvas.captureStream(30);
-                    
-                    recorderOptions = { mimeType: 'video/mp4; codecs=avc1' };
-                    if (!MediaRecorder.isTypeSupported(recorderOptions.mimeType)) {
-                        recorderOptions = { mimeType: 'video/webm; codecs=vp9' };
-                    }
-                    if (!MediaRecorder.isTypeSupported(recorderOptions.mimeType)) {
-                        recorderOptions = { mimeType: '' }; 
-                    }
-
                     isProcessing = true;
                     statusText.innerText = "黄緑の丸4つを画面内に収めてください";
                     requestAnimationFrame(processVideo);
@@ -212,49 +203,44 @@
             }
         });
 
-        // 録画インスタンスを新しく生成して開始する関数
-        function startNewRecorderSession() {
-            if (!isRecording) return;
+        function startRecordingSystem() {
+            let options = { mimeType: 'video/mp4; codecs=avc1' };
+            if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                options = { mimeType: 'video/webm; codecs=vp9' };
+            }
+            if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                options = { mimeType: '' }; 
+            }
 
-            mediaRecorder = new MediaRecorder(canvasStream, recorderOptions);
-            let localChunks = [];
+            mediaRecorder = new MediaRecorder(canvasStream, options);
 
+            // データが切り出されるたびに、IndexedDB（ストレージ）へ直接格納
             mediaRecorder.ondataavailable = (event) => {
                 if (event.data && event.data.size > 0) {
-                    localChunks.push(event.data);
-                }
-            };
-
-            mediaRecorder.onstop = () => {
-                // セッション終了時、集まったデータを一括でIndexedDB（ストレージ）へ書き込む
-                if (localChunks.length > 0) {
                     const transaction = db.transaction(["chunks"], "readwrite");
                     const store = transaction.objectStore("chunks");
-                    const combinedBlob = new Blob(localChunks, { type: mediaRecorder.mimeType });
-                    store.add(combinedBlob);
-                    localChunks = [];
-                }
-                
-                // 次のセッションを即時開始（隙間を最小限にする）
-                if (isRecording) {
-                    startNewRecorderSession();
-                } else {
-                    // ユーザーが停止ボタンを押した場合は統合処理へ
-                    finalizeVideo();
+                    store.add(event.data);
                 }
             };
 
+            // 録画が完全に停止した時の処理
+            mediaRecorder.onstop = () => {
+                finalizeVideo();
+            };
+
+            // 録画開始
             mediaRecorder.start();
+            isRecording = true;
+            stopRecordBtn.style.display = 'block';
+
+            // ★重要：2分ごとに録画を止めず、データだけを吐き出させてブラウザのメモリを空にする
+            intervalId = setInterval(() => {
+                if (mediaRecorder && mediaRecorder.state === "recording") {
+                    mediaRecorder.requestData(); 
+                }
+            }, FLUSH_LIMIT);
         }
 
-        // 2分ごとに現在のセッションを安全に終了させ、メモリをリセットさせるルーチン
-        function rotateRecorder() {
-            if (mediaRecorder && mediaRecorder.state === "recording") {
-                mediaRecorder.stop(); // これによりonstopが走り、自動的に次が生成されます
-            }
-        }
-
-        // 録画停止ボタン押下時
         stopRecordBtn.addEventListener('click', () => {
             if (isRecording) {
                 isRecording = false;
@@ -264,25 +250,25 @@
                 lockCounter = 0;
                 
                 if (mediaRecorder && mediaRecorder.state === "recording") {
-                    mediaRecorder.stop();
+                    mediaRecorder.stop(); // これによりonstop ➔ finalizeVideo が走ります
                 }
             }
         });
 
-        // 最後にデータベース内のすべての動画ブロックを1本にガッチャンコする
         function finalizeVideo() {
             statusText.innerText = "動画ファイルを1本に統合中...（数秒かかります）";
             
             const transaction = db.transaction(["chunks"], "readonly");
             transaction.objectStore("chunks").getAll().onsuccess = (e) => {
                 const allVideoBlobs = e.target.result;
-                if (allVideoBlobs.length === 0) {
-                    statusText.innerText = "録画データがありません。";
+                
+                if (!allVideoBlobs || allVideoBlobs.length === 0) {
+                    statusText.innerText = "エラー: 録画データが保存されていませんでした。";
                     return;
                 }
                 
-                const finalBlob = new Blob(allVideoBlobs, { type: recorderOptions.mimeType || 'video/mp4' });
-                const ext = recorderOptions.mimeType.includes('webm') ? 'webm' : 'mp4';
+                const finalBlob = new Blob(allVideoBlobs, { type: mediaRecorder.mimeType || 'video/mp4' });
+                const ext = (mediaRecorder.mimeType && mediaRecorder.mimeType.includes('webm')) ? 'webm' : 'mp4';
                 const url = URL.createObjectURL(finalBlob);
                 
                 const a = document.createElement('a');
@@ -294,13 +280,14 @@
                 document.body.removeChild(a);
                 URL.revokeObjectURL(url);
                 
-                statusText.innerHTML = `<span style="color: #34c759;">🎬 長時間映像が1本の動画として無事に保存されました！</span>`;
+                statusText.innerHTML = `<span style="color: #34c759;">🎬 動画が正常に保存されました！</span>`;
             };
         }
 
         function processVideo() {
             if (!isProcessing) return;
 
+            // キャンバスへカメラ映像を常に描画
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
             if (!isRecording) {
@@ -346,20 +333,15 @@
                     ctx.lineTo(pts[3].x, pts[3].y); ctx.closePath(); ctx.stroke();
 
                     if (lockCounter >= REQUIRED_FRAMES) {
-                        // OpenCVで使用していた一時用メモリをここで一度強制解放してクリーンにする
+                        // OpenCV用一時メモリをクリーンアップ
                         src.delete(); dst.delete(); hsv.delete(); mask.delete(); contours.delete(); hierarchy.delete();
                         
+                        canvas.classList.add('locked');
                         clearDatabase().then(() => {
-                            canvas.classList.add('locked');
-                            isRecording = true;
-                            stopRecordBtn.style.display = 'block';
-                            
-                            // 初回セッション起動
-                            startNewRecorderSession();
-                            // 2分(120秒)ごとに自動でレコーダーの破壊と再生成を行うタイマーを始動
-                            intervalId = setInterval(rotateRecorder, SESSION_LIMIT);
+                            // 安定した録画処理を始動
+                            startRecordingSystem();
                         });
-                        return; // requestAnimationFrameをここで抜けてOpenCVのループを完全停止
+                        return; // OpenCVのループをここで完全に終了
                     } else {
                         let timeLeft = Math.ceil((REQUIRED_FRAMES - lockCounter) / 30);
                         statusText.innerHTML = `🟡 4点捕捉中... 画角安定まであと <span style="color: #ffcc00; font-size: 20px;">${timeLeft}</span> 秒`;
@@ -374,7 +356,8 @@
                     }
                 }
             } else {
-                statusText.innerHTML = `<span style="color: #ff3b30;">🔴 長時間実験映像を録画中...（メモリ自動クリーンアップ稼働中・完全放置OK）</span>`;
+                // 録画中は動画描画のみを維持
+                statusText.innerHTML = `<span style="color: #ff3b30;">🔴 長時間実験映像を録画中...（バックグラウンド最適化済み・完全放置OK）</span>`;
             }
 
             requestAnimationFrame(processVideo);
