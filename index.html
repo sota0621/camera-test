@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出（5秒ロック・超軽量版）</title>
+    <title>黄緑色マーカー検出（C++録画ストリーム方式）</title>
     <style>
         body {
             margin: 0;
@@ -62,9 +62,9 @@
             background-color: #555;
             cursor: not-allowed;
         }
-        #stop-btn {
+        #stop-record-btn {
             background-color: #ff3b30;
-            display: none; 
+            display: none;
         }
         #status {
             font-size: 16px;
@@ -88,86 +88,31 @@
 
     <div class="btn-container">
         <button id="start-btn" class="btn" disabled>システム開始</button>
-        <button id="stop-btn" class="btn">⏹ 録画を終了して保存</button>
+        <button id="stop-record-btn" class="btn">⏹ 録画を停止して保存</button>
     </div>
 
     <script>
         const video = document.getElementById('camera-view');
         const canvas = document.getElementById('canvas-output');
-        const ctx = canvas.getContext('2d');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
         const startBtn = document.getElementById('start-btn');
-        const stopBtn = document.getElementById('stop-btn');
+        const stopRecordBtn = document.getElementById('stop-record-btn');
         const statusText = document.getElementById('status');
 
-        let src, dst, hsv, mask, contours, hierarchy;
+        let src, dst, hsv, mask;
         let isProcessing = false;
         
         let lockCounter = 0;
-        // ⏱ 10秒(300)から5秒(150)へ短縮変更
-        const REQUIRED_FRAMES = 150; 
+        const REQUIRED_FRAMES = 300; // 10秒間安定
 
-        // 録画用
+        // 録画用ストリーム制御（C++のVideoWriterの挙動に対応）
         let mediaRecorder;
+        let recordedChunks = [];
         let isRecording = false;
 
-        // IndexedDBの設定
-        const DB_NAME = "VideoStreamDB_v3";
-        const STORE_NAME = "chunks";
-        let db;
-        let chunkIndex = 0;
-
-        function initDB() {
-            return new Promise((resolve, reject) => {
-                const request = indexedDB.open(DB_NAME, 1);
-                request.onupgradeneeded = (e) => {
-                    const database = e.target.result;
-                    if (!database.objectStoreNames.contains(STORE_NAME)) {
-                        database.createObjectStore(STORE_NAME, { keyPath: "id" });
-                    }
-                };
-                request.onsuccess = (e) => {
-                    db = e.target.result;
-                    resolve();
-                };
-                request.onerror = (e) => reject(e.target.error);
-            });
-        }
-
-        function clearDB() {
-            return new Promise((resolve) => {
-                const tx = db.transaction(STORE_NAME, "readwrite");
-                const store = tx.objectStore(STORE_NAME);
-                store.clear();
-                tx.oncomplete = () => resolve();
-            });
-        }
-
-        function saveChunkToDB(blob) {
-            const tx = db.transaction(STORE_NAME, "readwrite");
-            const store = tx.objectStore(STORE_NAME);
-            store.put({ id: chunkIndex++, data: blob });
-        }
-
-        function getAllChunksFromDB() {
-            return new Promise((resolve) => {
-                const tx = db.transaction(STORE_NAME, "readonly");
-                const store = tx.objectStore(STORE_NAME);
-                const request = store.getAll();
-                request.onsuccess = () => {
-                    const sorted = request.result.sort((a, b) => a.id - b.id).map(item => item.data);
-                    resolve(sorted);
-                };
-            });
-        }
-
-        document.getElementById('opencv-src').addEventListener('load', async () => {
-            try {
-                await initDB();
-                statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
-                startBtn.disabled = false;
-            } catch(e) {
-                statusText.innerText = "データベースの初期化に失敗しました: " + e.message;
-            }
+        document.getElementById('opencv-src').addEventListener('load', () => {
+            statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
+            startBtn.disabled = false;
         });
 
         startBtn.addEventListener('click', async () => {
@@ -193,7 +138,10 @@
 
                 const constraints = {
                     audio: false,
-                    video: { width: { ideal: 1280 }, height: { ideal: 720 } }
+                    video: {
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    }
                 };
 
                 if (targetDeviceId) {
@@ -204,13 +152,17 @@
 
                 const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 
-                // 0.5倍固定
                 const videoTrack = stream.getVideoTracks()[0];
                 const capabilities = videoTrack.getCapabilities ? videoTrack.getCapabilities() : {};
+                
                 if (capabilities.zoom) {
                     try {
-                        await videoTrack.applyConstraints({ advanced: [{ zoom: capabilities.zoom.min }] });
-                    } catch (e) { console.warn(e); }
+                        await videoTrack.applyConstraints({
+                            advanced: [{ zoom: capabilities.zoom.min }]
+                        });
+                    } catch (e) {
+                        console.warn("ズーム倍率の設定に失敗: ", e);
+                    }
                 }
 
                 video.srcObject = stream;
@@ -225,9 +177,9 @@
                     dst = new cv.Mat(video.videoHeight, video.videoWidth, cv.CV_8UC4);
                     hsv = new cv.Mat();
                     mask = new cv.Mat();
-                    contours = new cv.MatVector();
-                    hierarchy = new cv.Mat();
 
+                    // 【参考部分】C++のVideoWriter初期化に相当するストリーム設定
+                    // 30fpsでCanvasからグラフィックをキャプチャして随時レコーダーへ送る
                     const canvasStream = canvas.captureStream(30);
                     
                     let options = { mimeType: 'video/mp4; codecs=avc1' };
@@ -242,33 +194,25 @@
                     
                     mediaRecorder.ondataavailable = (event) => {
                         if (event.data && event.data.size > 0) {
-                            saveChunkToDB(event.data);
+                            recordedChunks.push(event.data);
                         }
                     };
 
-                    mediaRecorder.onstop = async () => {
-                        statusText.innerText = "動画ファイルを生成中（数秒かかります）...";
-                        
-                        const chunks = await getAllChunksFromDB();
-                        const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'video/mp4' });
+                    mediaRecorder.onstop = () => {
+                        const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'video/mp4' });
+                        recordedChunks = [];
                         const url = URL.createObjectURL(blob);
-                        
                         const a = document.createElement('a');
                         a.href = url;
                         const nowTime = new Date().toISOString().replace(/[:.]/g, '-');
-                        a.download = `experiment-video-${nowTime}.mp4`;
+                        
+                        // C++の "rec.mp4" 出力に倣い、タイムスタンプ付きで自動保存
+                        a.download = `rec-${nowTime}.mp4`;
                         document.body.appendChild(a);
                         a.click();
                         document.body.removeChild(a);
                         URL.revokeObjectURL(url);
-                        
-                        stopBtn.style.display = 'none';
-                        canvas.classList.remove('locked');
-                        lockCounter = 0;
-                        statusText.innerHTML = `<span style="color: #34c759;">🎬 実験動画を保存しました</span>`;
-                        
-                        isProcessing = true;
-                        requestAnimationFrame(processVideo);
+                        statusText.innerHTML = `<span style="color: #34c759;">🎬 綺麗な映像で動画(rec-${nowTime}.mp4)を保存しました</span>`;
                     };
 
                     isProcessing = true;
@@ -280,20 +224,24 @@
             }
         });
 
-        stopBtn.addEventListener('click', () => {
+        stopRecordBtn.addEventListener('click', () => {
             if (isRecording) {
+                mediaRecorder.stop();
                 isRecording = false;
-                mediaRecorder.stop(); 
+                stopRecordBtn.style.display = 'none';
+                canvas.classList.remove('locked');
+                lockCounter = 0; 
             }
         });
 
         function processVideo() {
-            if (!isProcessing && !isRecording) return;
+            if (!isProcessing) return;
 
+            // 1. C++の `capture >> captureImage;` に相当：生映像をCanvasへ描画
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
             if (!isRecording) {
-                src.data.set(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
+                cv.imread(canvas, src);
 
                 cv.GaussianBlur(src, dst, new cv.Size(5, 5), 0, 0, cv.BORDER_DEFAULT);
                 cv.cvtColor(dst, hsv, cv.COLOR_RGBA2RGB);
@@ -304,27 +252,37 @@
                 cv.inRange(hsv, low, high, mask);
                 low.delete(); high.delete();
 
+                let contours = new cv.MatVector();
+                let hierarchy = new cv.Mat();
                 cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
                 let validCenters = [];
+
                 for (let i = 0; i < contours.size(); ++i) {
                     let cnt = contours.get(i);
                     let area = cv.contourArea(cnt);
+
                     if (area > 20) {
                         let perimeter = cv.arcLength(cnt, true);
                         if (perimeter > 0) {
                             let circularity = (4 * Math.PI * area) / (perimeter * perimeter);
                             if (circularity > 0.65) { 
                                 let M = cv.moments(cnt);
-                                if (M.m00 !== 0) validCenters.push({ x: M.m10 / M.m00, y: M.m01 / M.m00 });
+                                if (M.m00 !== 0) {
+                                    validCenters.push({ x: M.m10 / M.m00, y: M.m01 / M.m00 });
+                                }
                             }
                         }
                     }
                     cnt.delete();
                 }
 
+                contours.delete();
+                hierarchy.delete();
+
                 if (validCenters.length === 4) {
                     lockCounter++;
+
                     validCenters.sort((a, b) => a.y - b.y);
                     let topTwo = [validCenters[0], validCenters[1]].sort((a, b) => a.x - b.x);
                     let bottomTwo = [validCenters[2], validCenters[3]].sort((a, b) => a.x - b.x);
@@ -333,22 +291,23 @@
                     ctx.strokeStyle = '#34c759';
                     ctx.lineWidth = 5;
                     ctx.beginPath();
-                    ctx.moveTo(pts[0].x, pts[0].y); ctx.lineTo(pts[1].x, pts[1].y);
-                    ctx.lineTo(pts[2].x, pts[2].y); ctx.lineTo(pts[3].x, pts[3].y);
-                    ctx.closePath(); ctx.stroke();
+                    ctx.moveTo(pts[0].x, pts[0].y);
+                    ctx.lineTo(pts[1].x, pts[1].y);
+                    ctx.lineTo(pts[2].x, pts[2].y);
+                    ctx.lineTo(pts[3].x, pts[3].y);
+                    ctx.closePath();
+                    ctx.stroke();
 
                     if (lockCounter >= REQUIRED_FRAMES) {
+                        // 10秒経過時点でロック確定
                         canvas.classList.add('locked');
-                        isProcessing = false; 
-
-                        async function startRecordingSequence() {
-                            await clearDB();
-                            chunkIndex = 0;
-                            isRecording = true;
-                            mediaRecorder.start(1000); 
-                            stopBtn.style.display = 'block';
-                        }
-                        startRecordingSequence();
+                        recordedChunks = [];
+                        
+                        // 【ここから録画スタート】
+                        // C++のループ内での書き込み開始指示に相当
+                        mediaRecorder.start(); 
+                        isRecording = true;
+                        stopRecordBtn.style.display = 'block';
                     } else {
                         let timeLeft = Math.ceil((REQUIRED_FRAMES - lockCounter) / 30);
                         statusText.innerHTML = `🟡 4点捕捉中... 画角安定まであと <span style="color: #ffcc00; font-size: 20px;">${timeLeft}</span> 秒`;
@@ -357,13 +316,19 @@
                     lockCounter = 0;
                     canvas.classList.remove('locked');
                     statusText.innerHTML = `🔍 マーカーを探しています... (${validCenters.length} / 4)`;
+                    
                     ctx.fillStyle = 'red';
                     for(let p of validCenters) {
-                        ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI); ctx.fill();
+                        ctx.beginPath();
+                        ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI);
+                        ctx.fill();
                     }
                 }
             } else {
-                statusText.innerHTML = `<span style="color: #34c759;">🟢 長時間録画中（解析処理を一時停止して軽量化しています。完全放置OK）</span>`;
+                // 【重要】`isRecording === true` のとき：
+                // C++の `rec << recImage;` と同様、何も加工されていない純粋な
+                // `ctx.drawImage` 後の生映像が、自動的に `mediaRecorder` へストリーミングされます。
+                statusText.innerHTML = `<span style="color: #ff3b30;">🔴 画角が固定されました：実験映像を録画中...</span>`;
             }
 
             requestAnimationFrame(processVideo);
