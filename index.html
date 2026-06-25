@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出（長時間録画対応・スマホ分割保存版）</title>
+    <title>黄緑色マーカー検出（iPhone完全放置・長時間録画対応版）</title>
     <style>
         body {
             margin: 0;
@@ -105,15 +105,61 @@
         let lockCounter = 0;
         const REQUIRED_FRAMES = 150; // 5秒間安定 (30fps換算)
 
-        // 録画用の変数
+        // 録画・データベース用の変数
         let mediaRecorder;
         let isRecording = false;
-        let fileIndex = 1; // 分割ファイルの番号
-        const CHUNK_INTERVAL = 180000; // ★3分(180,000ミリ秒)ごとに動画ファイルを区切って保存
+        let db = null;
+        let chunkCount = 0;
+        const CHUNK_INTERVAL = 60000; // 1分ごとにスマホ内蔵ストレージ（DB）へ退避してメモリを解放
 
-        document.getElementById('opencv-src').addEventListener('load', () => {
-            statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
-            startBtn.disabled = false;
+        // IndexedDB（スマホ内の大容量保存エリア）の初期化
+        function initDatabase() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open("VideoRecorderDB", 1);
+                request.onupgradeneeded = (e) => {
+                    const database = e.target.result;
+                    if (!database.objectStoreNames.contains("video_chunks")) {
+                        database.createObjectStore("video_chunks", { autoIncrement: true });
+                    }
+                };
+                request.onsuccess = (e) => {
+                    db = e.target.result;
+                    resolve();
+                };
+                request.onerror = (e) => reject(e);
+            });
+        }
+
+        // 録画データの断片（チャンク）をDBに保存する関数
+        function saveChunkToDB(blob) {
+            if (!db) return;
+            const transaction = db.transaction(["video_chunks"], "readwrite");
+            const store = transaction.objectStore("video_chunks");
+            store.add(blob);
+            chunkCount++;
+        }
+
+        // DBに溜まった全データを消去（撮影開始時に呼ぶ）
+        function clearDatabase() {
+            return new Promise((resolve) => {
+                const transaction = db.transaction(["video_chunks"], "readwrite");
+                const store = transaction.objectStore("video_chunks");
+                const request = store.clear();
+                request.onsuccess = () => {
+                    chunkCount = 0;
+                    resolve();
+                };
+            });
+        }
+
+        document.getElementById('opencv-src').addEventListener('load', async () => {
+            try {
+                await initDatabase();
+                statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
+                startBtn.disabled = false;
+            } catch (e) {
+                statusText.innerText = "データベースの初期化に失敗しました";
+            }
         });
 
         startBtn.addEventListener('click', async () => {
@@ -183,7 +229,6 @@
 
                     const canvasStream = canvas.captureStream(30);
                     
-                    // iOS / iPhoneで確実に動作する標準的なMP4(H.264)系のコンテナ形式を指定
                     let options = { mimeType: 'video/mp4; codecs=avc1' };
                     if (!MediaRecorder.isTypeSupported(options.mimeType)) {
                         options = { mimeType: 'video/webm; codecs=vp9' };
@@ -194,11 +239,43 @@
 
                     mediaRecorder = new MediaRecorder(canvasStream, options);
                     
-                    // 指定時間（3分）が経過するか、stop() が呼ばれるとここが走る
+                    // 1分ごとにデータが届き、スマホ内蔵ストレージに自動保存（ポップアップは一切出ません）
                     mediaRecorder.ondataavailable = (event) => {
                         if (event.data && event.data.size > 0) {
-                            saveBlobToDevice(event.data);
+                            saveChunkToDB(event.data);
                         }
+                    };
+
+                    // 録画停止ボタンが押されたら、DBからデータを全部繋げて1本の動画としてダウンロードさせる
+                    mediaRecorder.onstop = () => {
+                        statusText.innerText = "動画ファイルを構築中...（数秒かかります）";
+                        
+                        const transaction = db.transaction(["video_chunks"], "readonly");
+                        const store = transaction.objectStore("video_chunks");
+                        const request = store.getAll();
+                        
+                        request.onsuccess = () => {
+                            const allChunks = request.result;
+                            if (allChunks.length === 0) {
+                                statusText.innerText = "録画データがありませんでした。";
+                                return;
+                            }
+                            
+                            const finalBlob = new Blob(allChunks, { type: mediaRecorder.mimeType || 'video/mp4' });
+                            const ext = mediaRecorder.mimeType.includes('webm') ? 'webm' : 'mp4';
+                            const url = URL.createObjectURL(finalBlob);
+                            
+                            const a = document.createElement('a');
+                            a.href = url;
+                            const nowTime = new Date().toISOString().replace(/[:.]/g, '-');
+                            a.download = `experiment-video-${nowTime}.${ext}`;
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(url);
+                            
+                            statusText.innerHTML = `<span style="color: #34c759;">🎬 1本の動画として無事に保存されました！</span>`;
+                        };
                     };
 
                     isProcessing = true;
@@ -210,27 +287,9 @@
             }
         });
 
-        // データをiPhone内に自動ダウンロード保存させる関数
-        function saveBlobToDevice(blobData) {
-            const ext = mediaRecorder.mimeType.includes('webm') ? 'webm' : 'mp4';
-            const url = URL.createObjectURL(blobData);
-            const a = document.createElement('a');
-            a.href = url;
-            const nowTime = new Date().toISOString().replace(/[:.]/g, '-');
-            // 分割保存だとわかるようにパート数を名前に含める
-            a.download = `experiment-part${fileIndex}-${nowTime}.${ext}`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-            
-            statusText.innerHTML = `<span style="color: #34c759;">🎬 動画パート ${fileIndex} を自動保存しました</span>`;
-            fileIndex++;
-        }
-
         stopRecordBtn.addEventListener('click', () => {
             if (isRecording) {
-                mediaRecorder.stop(); // これにより最後の数分未満の端数データもondataavailableに送られて保存されます
+                mediaRecorder.stop();
                 isRecording = false;
                 stopRecordBtn.style.display = 'none';
                 canvas.classList.remove('locked');
@@ -241,10 +300,8 @@
         function processVideo() {
             if (!isProcessing) return;
 
-            // ベースとなるカメラ映像をキャンバスに描画
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-            // 録画中でない（＝カウント中や、探している最中）場合のみ、OpenCVでのマーカー解析と線・文字の描画を行う
             if (!isRecording) {
                 src.data.set(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
 
@@ -288,7 +345,6 @@
                     let bottomTwo = [validCenters[2], validCenters[3]].sort((a, b) => a.x - b.x);
                     const pts = [topTwo[0], topTwo[1], bottomTwo[1], bottomTwo[0]];
 
-                    // カウントダウン中のみ「緑色の四角枠」を描画
                     ctx.strokeStyle = '#34c759';
                     ctx.lineWidth = 5;
                     ctx.beginPath();
@@ -300,15 +356,13 @@
                     ctx.stroke();
 
                     if (lockCounter >= REQUIRED_FRAMES) {
-                        // ロックが確定した瞬間
-                        canvas.classList.add('locked');
-                        fileIndex = 1;
-
-                        // ★最重要: 引数にミリ秒を渡すことで、3分ごとにデータを区切って自動排出させます
-                        mediaRecorder.start(CHUNK_INTERVAL);
-                        isRecording = true;
-                        
-                        stopRecordBtn.style.display = 'block';
+                        // ロック確定時、過去の古い一時データをクリアしてから録画開始
+                        clearDatabase().then(() => {
+                            canvas.classList.add('locked');
+                            mediaRecorder.start(CHUNK_INTERVAL); // 1分ごとに内蔵ストレージ（DB）へ排出
+                            isRecording = true;
+                            stopRecordBtn.style.display = 'block';
+                        });
                     } else {
                         let timeLeft = Math.ceil((REQUIRED_FRAMES - lockCounter) / 30);
                         statusText.innerHTML = `🟡 4点捕捉中... 画角安定まであと <span style="color: #ffcc00; font-size: 20px;">${timeLeft}</span> 秒`;
@@ -326,8 +380,8 @@
                     }
                 }
             } else {
-                // 録画中
-                statusText.innerHTML = `<span style="color: #ff3b30;">🔴 実験映像を長時間録画中... (3分ごとに自動ファイル保存されます)</span>`;
+                // 録画中：完全にほったらかしでOK
+                statusText.innerHTML = `<span style="color: #ff3b30;">🔴 実験映像を長時間録画中...（自動でバックグラウンド保存されています。途中で触る必要はありません）</span>`;
             }
 
             requestAnimationFrame(processVideo);
