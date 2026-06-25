@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出（長時間録画対応・ストリーミング保存版）</title>
+    <title>黄緑色マーカー検出（長時間録画対応・スマホ分割保存版）</title>
     <style>
         body {
             margin: 0;
@@ -87,8 +87,8 @@
     </div>
 
     <div class="btn-container">
-        <button id="start-btn" class="btn" disabled>システム開始 (保存先選択)</button>
-        <button id="stop-record-btn" class="btn">⏹ 録画を停止して保存確定</button>
+        <button id="start-btn" class="btn" disabled>システム開始</button>
+        <button id="stop-record-btn" class="btn">⏹ 録画を停止して保存</button>
     </div>
 
     <script>
@@ -105,42 +105,20 @@
         let lockCounter = 0;
         const REQUIRED_FRAMES = 150; // 5秒間安定 (30fps換算)
 
-        // 録画・ファイルストリーム用の変数
+        // 録画用の変数
         let mediaRecorder;
         let isRecording = false;
-        let fileHandle = null;
-        let writableStream = null;
+        let fileIndex = 1; // 分割ファイルの番号
+        const CHUNK_INTERVAL = 180000; // ★3分(180,000ミリ秒)ごとに動画ファイルを区切って保存
 
         document.getElementById('opencv-src').addEventListener('load', () => {
-            // File System Access API のサポートチェック
-            if ('showSaveFilePicker' in window) {
-                statusText.innerText = "準備完了！ボタンを押して保存先の指定とスキャンを開始してください";
-                startBtn.disabled = false;
-            } else {
-                statusText.innerHTML = '<span style="color: #ff3b30;">エラー: お使いのブラウザは直接保存APIに対応していません。PCのChromeまたはEdgeをご利用ください。</span>';
-            }
+            statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
+            startBtn.disabled = false;
         });
 
         startBtn.addEventListener('click', async () => {
-            statusText.innerText = "動画の保存先を選択してください...";
-            
+            statusText.innerText = "広角スキャン用カメラを探索中...";
             try {
-                // 1. 最初にあらかじめユーザーに動画ファイルの保存先（ローカルストレージ）を選択させる
-                const nowTime = new Date().toISOString().replace(/[:.]/g, '-');
-                const optionsPicker = {
-                    suggestedName: `experiment-video-${nowTime}.webm`,
-                    types: [{
-                        description: 'Video File',
-                        accept: { 'video/webm': ['.webm'] },
-                    }],
-                };
-                
-                fileHandle = await window.showSaveFilePicker(optionsPicker);
-                // 書き込みストリームをオープン
-                writableStream = await fileHandle.createWritable();
-
-                statusText.innerText = "広角スキャン用カメラを探索中...";
-
                 const initStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
                 initStream.getTracks().forEach(track => track.stop());
 
@@ -205,36 +183,22 @@
 
                     const canvasStream = canvas.captureStream(30);
                     
-                    // ストリーミング書き込みと親和性の高い WebM (VP9/VP8) を優先
-                    let options = { mimeType: 'video/webm; codecs=vp9' };
+                    // iOS / iPhoneで確実に動作する標準的なMP4(H.264)系のコンテナ形式を指定
+                    let options = { mimeType: 'video/mp4; codecs=avc1' };
                     if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                        options = { mimeType: 'video/webm; codecs=vp8' };
+                        options = { mimeType: 'video/webm; codecs=vp9' };
                     }
                     if (!MediaRecorder.isTypeSupported(options.mimeType)) {
                         options = { mimeType: '' }; 
                     }
 
-                    // MediaRecorderインスタンスを作成
                     mediaRecorder = new MediaRecorder(canvasStream, options);
                     
-                    // 【最重要】データが届くたびに、メモリに溜めず直接HDD/SSDのストリームへ書き込む
-                    mediaRecorder.ondataavailable = async (event) => {
-                        if (event.data && event.data.size > 0 && writableStream) {
-                            try {
-                                await writableStream.write(event.data);
-                            } catch (err) {
-                                console.error("ファイルへの書き込みエラー:", err);
-                            }
+                    // 指定時間（3分）が経過するか、stop() が呼ばれるとここが走る
+                    mediaRecorder.ondataavailable = (event) => {
+                        if (event.data && event.data.size > 0) {
+                            saveBlobToDevice(event.data);
                         }
-                    };
-
-                    mediaRecorder.onstop = async () => {
-                        if (writableStream) {
-                            // ファイルストリームを閉じて、ローカルのファイルへの保存を確定させる
-                            await writableStream.close();
-                            writableStream = null;
-                        }
-                        statusText.innerHTML = `<span style="color: #34c759;">🎬 映像をローカルストレージへリアルタイム直接保存しました</span>`;
                     };
 
                     isProcessing = true;
@@ -242,17 +206,31 @@
                     requestAnimationFrame(processVideo);
                 };
             } catch (error) {
-                statusText.innerText = "起動失敗またはファイル選択キャンセル: " + error.message;
-                if (writableStream) {
-                    writableStream.close();
-                    writableStream = null;
-                }
+                statusText.innerText = "カメラ起動失敗: " + error.message;
             }
         });
 
+        // データをiPhone内に自動ダウンロード保存させる関数
+        function saveBlobToDevice(blobData) {
+            const ext = mediaRecorder.mimeType.includes('webm') ? 'webm' : 'mp4';
+            const url = URL.createObjectURL(blobData);
+            const a = document.createElement('a');
+            a.href = url;
+            const nowTime = new Date().toISOString().replace(/[:.]/g, '-');
+            // 分割保存だとわかるようにパート数を名前に含める
+            a.download = `experiment-part${fileIndex}-${nowTime}.${ext}`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            statusText.innerHTML = `<span style="color: #34c759;">🎬 動画パート ${fileIndex} を自動保存しました</span>`;
+            fileIndex++;
+        }
+
         stopRecordBtn.addEventListener('click', () => {
             if (isRecording) {
-                mediaRecorder.stop();
+                mediaRecorder.stop(); // これにより最後の数分未満の端数データもondataavailableに送られて保存されます
                 isRecording = false;
                 stopRecordBtn.style.display = 'none';
                 canvas.classList.remove('locked');
@@ -324,15 +302,14 @@
                     if (lockCounter >= REQUIRED_FRAMES) {
                         // ロックが確定した瞬間
                         canvas.classList.add('locked');
+                        fileIndex = 1;
 
-                        // 自動録画をスタート（引数に1000msを渡し、1秒ごとにondataavailableを発生させてストリームへ流す）
-                        mediaRecorder.start(1000);
+                        // ★最重要: 引数にミリ秒を渡すことで、3分ごとにデータを区切って自動排出させます
+                        mediaRecorder.start(CHUNK_INTERVAL);
                         isRecording = true;
                         
-                        // 録画停止ボタンを出現させる
                         stopRecordBtn.style.display = 'block';
                     } else {
-                        // カウントダウンテキストを表示
                         let timeLeft = Math.ceil((REQUIRED_FRAMES - lockCounter) / 30);
                         statusText.innerHTML = `🟡 4点捕捉中... 画角安定まであと <span style="color: #ffcc00; font-size: 20px;">${timeLeft}</span> 秒`;
                     }
@@ -341,7 +318,6 @@
                     canvas.classList.remove('locked');
                     statusText.innerHTML = `🔍 マーカーを探しています... (${validCenters.length} / 4)`;
                     
-                    // カウントダウンしていない間だけ、捕捉できている点に「赤丸」を表示
                     ctx.fillStyle = 'red';
                     for(let p of validCenters) {
                         ctx.beginPath();
@@ -350,9 +326,8 @@
                     }
                 }
             } else {
-                // 録画中 (isRecording === true)
-                // キャンバスに上書きをしないことで、生映像を録画ストリームに流し続ける
-                statusText.innerHTML = `<span style="color: #ff3b30;">🔴 画角が固定されました：ストレージへリアルタイム録画中...（数十分以上の撮影が可能）</span>`;
+                // 録画中
+                statusText.innerHTML = `<span style="color: #ff3b30;">🔴 実験映像を長時間録画中... (3分ごとに自動ファイル保存されます)</span>`;
             }
 
             requestAnimationFrame(processVideo);
