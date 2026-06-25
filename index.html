@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>黄緑色マーカー検出（C++録画ストリーム方式）</title>
+    <title>料理撮影用・黄緑色マーカー検出（長時間録画対応版）</title>
     <style>
         body {
             margin: 0;
@@ -33,8 +33,8 @@
             transition: border-color 0.3s;
         }
         canvas.locked {
-            border-color: #34c759;
-            box-shadow: 0 0 15px rgba(52, 199, 89, 0.5);
+            border-color: #ff3b30; /* 録画中は赤枠にしてわかりやすく */
+            box-shadow: 0 0 15px rgba(255, 59, 48, 0.5);
         }
         .btn-container {
             display: flex;
@@ -103,12 +103,14 @@
         let isProcessing = false;
         
         let lockCounter = 0;
-        const REQUIRED_FRAMES = 300; // 10秒間安定
+        const REQUIRED_FRAMES = 150; // 【変更】5秒間安定（30fps × 5秒）
 
-        // 録画用ストリーム制御（C++のVideoWriterの挙動に対応）
+        // 録画用の変数
         let mediaRecorder;
         let recordedChunks = [];
         let isRecording = false;
+        let recordingStartTime = 0;
+        let timerInterval;
 
         document.getElementById('opencv-src').addEventListener('load', () => {
             statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
@@ -137,7 +139,7 @@
                 }
 
                 const constraints = {
-                    audio: false,
+                    audio: false, // 必要に応じてマイク音声を残す場合は true に変更してください
                     video: {
                         width: { ideal: 1280 },
                         height: { ideal: 720 }
@@ -178,10 +180,9 @@
                     hsv = new cv.Mat();
                     mask = new cv.Mat();
 
-                    // 【参考部分】C++のVideoWriter初期化に相当するストリーム設定
-                    // 30fpsでCanvasからグラフィックをキャプチャして随時レコーダーへ送る
-                    const canvasStream = canvas.captureStream(30);
-                    
+                    // 【長時間対応・超重要】
+                    // Canvasからではなく、カメラの「生ストリーム(stream)」を直接MediaRecorderに渡します。
+                    // これにより描画負荷が一切かからなくなり、数十分の撮影でもコマ落ちやクラッシュが防げます。
                     let options = { mimeType: 'video/mp4; codecs=avc1' };
                     if (!MediaRecorder.isTypeSupported(options.mimeType)) {
                         options = { mimeType: 'video/webm; codecs=vp9' };
@@ -190,7 +191,7 @@
                         options = { mimeType: '' }; 
                     }
 
-                    mediaRecorder = new MediaRecorder(canvasStream, options);
+                    mediaRecorder = new MediaRecorder(stream, options);
                     
                     mediaRecorder.ondataavailable = (event) => {
                         if (event.data && event.data.size > 0) {
@@ -199,20 +200,19 @@
                     };
 
                     mediaRecorder.onstop = () => {
+                        clearInterval(timerInterval);
                         const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'video/mp4' });
                         recordedChunks = [];
                         const url = URL.createObjectURL(blob);
                         const a = document.createElement('a');
                         a.href = url;
                         const nowTime = new Date().toISOString().replace(/[:.]/g, '-');
-                        
-                        // C++の "rec.mp4" 出力に倣い、タイムスタンプ付きで自動保存
-                        a.download = `rec-${nowTime}.mp4`;
+                        a.download = `cooking-video-${nowTime}.mp4`;
                         document.body.appendChild(a);
                         a.click();
                         document.body.removeChild(a);
                         URL.revokeObjectURL(url);
-                        statusText.innerHTML = `<span style="color: #34c759;">🎬 綺麗な映像で動画(rec-${nowTime}.mp4)を保存しました</span>`;
+                        statusText.innerHTML = `<span style="color: #34c759;">🎬 料理動画を保存しました (cooking-video-${nowTime}.mp4)</span>`;
                     };
 
                     isProcessing = true;
@@ -234,12 +234,22 @@
             }
         });
 
+        // 録画中の経過時間（タイマー）を計算する関数
+        function updateTimer() {
+            if (!isRecording) return;
+            const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+            const minutes = String(Math.floor(elapsed / 60)).padStart(2, '0');
+            const seconds = String(elapsed % 60).padStart(2, '0');
+            statusText.innerHTML = `<span style="color: #ff3b30; font-weight: bold;">🔴 料理動画を録画中... [ 経過時間 ${minutes}:${seconds} ]</span>`;
+        }
+
         function processVideo() {
             if (!isProcessing) return;
 
-            // 1. C++の `capture >> captureImage;` に相当：生映像をCanvasへ描画
+            // 毎フレームカメラ映像をCanvasに描画（プレビュー用）
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
+            // 録画中でない場合のみ、OpenCVでの解析と枠線描画を行う
             if (!isRecording) {
                 cv.imread(canvas, src);
 
@@ -288,6 +298,7 @@
                     let bottomTwo = [validCenters[2], validCenters[3]].sort((a, b) => a.x - b.x);
                     const pts = [topTwo[0], topTwo[1], bottomTwo[1], bottomTwo[0]];
 
+                    // カウントダウン中の緑枠描画
                     ctx.strokeStyle = '#34c759';
                     ctx.lineWidth = 5;
                     ctx.beginPath();
@@ -299,18 +310,21 @@
                     ctx.stroke();
 
                     if (lockCounter >= REQUIRED_FRAMES) {
-                        // 10秒経過時点でロック確定
+                        // 5秒経過で録画スタート
                         canvas.classList.add('locked');
                         recordedChunks = [];
-                        
-                        // 【ここから録画スタート】
-                        // C++のループ内での書き込み開始指示に相当
-                        mediaRecorder.start(); 
+                        mediaRecorder.start();
                         isRecording = true;
+                        
+                        // タイマーの開始
+                        recordingStartTime = Date.now();
+                        timerInterval = setInterval(updateTimer, 1000);
+                        
                         stopRecordBtn.style.display = 'block';
                     } else {
+                        // 【5秒対応】残り秒数を計算して表示
                         let timeLeft = Math.ceil((REQUIRED_FRAMES - lockCounter) / 30);
-                        statusText.innerHTML = `🟡 4点捕捉中... 画角安定まであと <span style="color: #ffcc00; font-size: 20px;">${timeLeft}</span> 秒`;
+                        statusText.innerHTML = `🟡 4点捕捉中... 画角固定まであと <span style="color: #ffcc00; font-size: 20px;">${timeLeft}</span> 秒`;
                     }
                 } else {
                     lockCounter = 0;
@@ -325,10 +339,9 @@
                     }
                 }
             } else {
-                // 【重要】`isRecording === true` のとき：
-                // C++の `rec << recImage;` と同様、何も加工されていない純粋な
-                // `ctx.drawImage` 後の生映像が、自動的に `mediaRecorder` へストリーミングされます。
-                statusText.innerHTML = `<span style="color: #ff3b30;">🔴 画角が固定されました：実験映像を録画中...</span>`;
+                // 録画中はOpenCVの重い解析処理をすべてスキップするため、
+                // CPU・メモリの負荷がほぼゼロになり、数十分の長時間撮影が可能になります。
+                // 保存される映像にも、枠線や赤丸は一切入りません。
             }
 
             requestAnimationFrame(processVideo);
