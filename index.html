@@ -103,7 +103,7 @@
         let isProcessing = false;
         
         let lockCounter = 0;
-        const REQUIRED_FRAMES = 300; // 10秒間安定
+        const REQUIRED_FRAMES = 150; // 10秒間安定
 
         // 録画用の変数
         let mediaRecorder;
@@ -266,7 +266,7 @@
                         let perimeter = cv.arcLength(cnt, true);
                         if (perimeter > 0) {
                             let circularity = (4 * Math.PI * area) / (perimeter * perimeter);
-                            if (circularity > 0.65) { 
+                            if (circularity > 0.85) { 
                                 let M = cv.moments(cnt);
                                 if (M.m00 !== 0) {
                                     validCenters.push({ x: M.m10 / M.m00, y: M.m01 / M.m00 });
