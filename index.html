@@ -109,10 +109,8 @@
         let mediaRecorder;
         let isRecording = false;
         let cameraStream = null;
-        let fileIndex = 1;
         let animationFrameId = null;
-        
-        const CHUNK_INTERVAL = 180000; // 3分ごとに自動排出
+        let recordedChunks = []; // ★修正：録画データを一時蓄積する配列
 
         document.getElementById('opencv-src').addEventListener('load', () => {
             statusText.innerText = "準備完了！ボタンを押してスキャンを開始してください";
@@ -184,21 +182,29 @@
                 options = { mimeType: '' }; 
             }
 
-            // ★超重要：Canvas（画面上の見た目）ではなく、カメラの生のレンズデータ（cameraStream）を直接録画！
+            recordedChunks = []; // バッファをクリア
             mediaRecorder = new MediaRecorder(cameraStream, options);
-            fileIndex = 1;
 
+            // 録画中、データが引き渡されたら配列に溜める
             mediaRecorder.ondataavailable = (event) => {
                 if (event.data && event.data.size > 0) {
-                    triggerSecureDownload(event.data);
+                    recordedChunks.push(event.data);
                 }
             };
 
-            mediaRecorder.start(CHUNK_INTERVAL);
+            // 録画停止時に一発ダウンロードを実行
+            mediaRecorder.onstop = () => {
+                const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'video/mp4' });
+                triggerSecureDownload(blob);
+            };
+
+            // ★修正：引数のCHUNK_INTERVALを廃止。バックグラウンドで1本のセッションとして記録
+            mediaRecorder.start();
             isRecording = true;
             stopRecordBtn.style.display = 'block';
         }
 
+        // ユーザータップ（stopクリック）を起点に発火するため、Safariのポップアップを回避可能
         function triggerSecureDownload(blobData) {
             const ext = (mediaRecorder.mimeType && mediaRecorder.mimeType.includes('webm')) ? 'webm' : 'mp4';
             const url = URL.createObjectURL(blobData);
@@ -206,7 +212,7 @@
             const a = document.createElement('a');
             a.href = url;
             const nowTime = new Date().toISOString().replace(/[:.]/g, '-');
-            a.download = `experiment-part${fileIndex}-${nowTime}.${ext}`;
+            a.download = `experiment-video-${nowTime}.${ext}`;
             
             document.body.appendChild(a);
             
@@ -223,8 +229,7 @@
                 URL.revokeObjectURL(url);
             }, 1000);
 
-            statusText.innerHTML = `<span style="color: #34c759;">🎬 動画パート ${fileIndex} を自動保存しました</span>`;
-            fileIndex++;
+            statusText.innerHTML = `<span style="color: #34c759; font-size: 18px;">■ 録画を安全に終了しました。<br>「ファイル」アプリの「ダウンロード」を確認してください。</span>`;
         }
 
         stopRecordBtn.addEventListener('click', () => {
@@ -233,7 +238,7 @@
                 stopRecordBtn.style.display = 'none';
                 
                 if (mediaRecorder && mediaRecorder.state === "recording") {
-                    mediaRecorder.stop(); 
+                    mediaRecorder.stop(); // これにより mediaRecorder.onstop が発火
                 }
 
                 if (cameraStream) {
@@ -245,7 +250,7 @@
 
                 ctx.fillStyle = "#222";
                 ctx.fillRect(0, 0, canvas.width, canvas.height);
-                statusText.innerHTML = `<span style="color: #34c759; font-size: 18px;">■ 録画を安全に終了しました。<br>「ファイル」アプリの「ダウンロード」を確認してください。</span>`;
+                statusText.innerText = "動画ファイルを生成中...";
             }
         });
 
@@ -253,7 +258,6 @@
             if (!isProcessing) return;
 
             if (!isRecording) {
-                // スキャン中（録画が始まる前）だけ、Canvasの描画とOpenCVを実行
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
                 src.data.set(ctx.getImageData(0, 0, canvas.width, canvas.height).data);
@@ -307,7 +311,8 @@
 
                         // 2. 画面を録画中モードの表示（赤枠・静止）に変更
                         canvas.classList.add('locked');
-                        statusText.innerHTML = `<span style="color: #ff3b30;">🔴 長時間実験映像を録画中...（3分ごとにpart1, part2...として自動で『ファイル』アプリへダウンロード保存されます）</span>`;
+                        // ★修正：文言を「終了時に1本保存」に変更
+                        statusText.innerHTML = `<span style="color: #ff3b30;">🔴 長時間実験映像を録画中...（実験終了時に停止ボタンを押すと、1本の動画として安全に保存されます。そのまま放置してください）</span>`;
 
                         // 3. カメラの生データから直接録画を開始
                         startRecordingSystem();
