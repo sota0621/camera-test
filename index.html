@@ -347,7 +347,7 @@
                         let perimeter = cv.arcLength(cnt, true);
                         if (perimeter > 0) {
                             let circularity = (4 * Math.PI * area) / (perimeter * perimeter);
-                            if (circularity > 0.9) { 
+                            if (circularity > 0.87) { 
                                 let M = cv.moments(cnt);
                                 if (M.m00 !== 0) validCenters.push({ x: M.m10 / M.m00, y: M.m01 / M.m00 });
                             }
